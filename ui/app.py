@@ -19,7 +19,7 @@ credentials = {
 authenticator = stauth.Authenticate(
     credentials, "scanner_cookie", "scanner_key", cookie_expiry_days=30
 )
-name, auth_status, username = authenticator.login(location="main")
+name, auth_status, username = authenticator.login("main")
 
 # ---- SI CONNECTÉ ----
 if auth_status:
