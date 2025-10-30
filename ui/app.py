@@ -291,3 +291,89 @@ with tab_single:
                 st.line_chart(df[["Close"]])
         except Exception as e:
             st.error(f"Erreur : {e}")
+
+# --------- Onglet 🚀 SCANNER COMPLET (univers) ---------
+with tab_full:
+    st.title("Scanner complet — Univers entier")
+
+    uni = load_universe()
+    base = uni.loc[uni["ticker"].astype(str).str.len() > 0].copy()
+
+    # Filtres
+    colf1, colf2, colf3 = st.columns([1, 2, 1])
+    markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
+    sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
+    query = colf2.text_input("Recherche (ticker ou nom contient…)", "")
+    limit = colf3.number_input("Limite (nb tickers à scanner)", min_value=10, max_value=2000, value=300, step=10)
+
+    dfv = base.copy()
+    if sel_markets and "(Tous)" not in sel_markets:
+        dfv = dfv[dfv["market"].isin(sel_markets)]
+    if query.strip():
+        q = query.strip().lower()
+        dfv = dfv[dfv["ticker"].str.lower().str.contains(q) | dfv["name"].str.lower().str.contains(q)]
+
+    tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
+    st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
+
+    if st.button("🚀 Lancer le scan complet (parallèle)"):
+        start = time.time()
+        rows = []
+        prog = st.progress(0)
+        done = 0
+
+        def worker(tkr):
+            return score_one(tkr)
+
+        max_workers = min(8, max(2, os.cpu_count() or 4))
+        with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(worker, t): t for t in tickers}
+            for fut in cf.as_completed(futures):
+                res = fut.result()
+                if res is not None:
+                    rows.append(res)
+                done += 1
+                prog.progress(done / max(len(tickers), 1))
+
+        elapsed = time.time() - start
+
+        if rows:
+            out = (pd.DataFrame(rows)
+                   .sort_values(by=["Score", "Ticker"], ascending=[False, True])
+                   .reset_index(drop=True))
+
+            # Signal visuel + colonnes ordonnées avec Name juste après Ticker
+            def to_signal(a: str) -> str:
+                return {
+                    "BUY": "🟢 BUY",
+                    "WATCH": "🟢 WATCH",
+                    "HOLD": "⚪ HOLD",
+                    "REDUCE": "🟠 REDUCE",
+                    "SELL": "🔴 SELL"
+                }.get(a, a)
+
+            out["Signal"] = out["Action"].map(to_signal)
+
+            cols = ["Ticker", "Name", "Signal", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20", "Action"]
+            out = out[[c for c in cols if c in out.columns]]
+
+            st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
+            st.dataframe(out, use_container_width=True)
+
+            # Export CSV
+            buffer = io.StringIO()
+            out.to_csv(buffer, index=False)
+            st.download_button(
+                "⬇️ Exporter résultats (CSV)",
+                data=buffer.getvalue().encode(),
+                file_name="scan_results.csv",
+                mime="text/csv"
+            )
+
+            st.markdown("**Top 25 opportunités 🟢**")
+            st.dataframe(
+                out.head(25)[["Ticker", "Name", "Signal", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20"]],
+                use_container_width=True
+            )
+        else:
+            st.info("Aucun résultat (tickers invalides ou indisponibles).")
