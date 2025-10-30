@@ -10,7 +10,7 @@ st.set_page_config(page_title="Scanner", layout="wide")
 
 # ---------- AUTH (maison, simple & robuste) ----------
 USERNAME = "egorge"
-PASSWORD_HASH = os.getenv("PASSWORD_HASH", "$2b$12$REPLACE_WITH_HASH")  # <= ton hash bcrypt déjà mis
+PASSWORD_HASH = os.getenv("PASSWORD_HASH", "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe")  # <= ton hash bcrypt déjà mis
 
 def login_form():
     st.title("Login")
