@@ -485,7 +485,7 @@ with tab_pos:
             ticker_in = r["ticker"] or ticker_in
             st.session_state["prefill_isin"] = isin
             st.session_state["prefill_ticker"] = ticker_in
-            st.experimental_rerun()
+            st.rerun()
 
         # recharger valeurs préremplies si présentes
         isin = st.session_state.get("prefill_isin", isin)
