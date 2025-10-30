@@ -25,3 +25,50 @@ def check_password(raw_password: str, bcrypted: str) -> bool:
     try:
         return bcrypt.checkpw(raw_password.encode(), bcrypted.encode())
     except Exception:
+        return False
+
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+
+if not st.session_state.auth:
+    submitted, u, p, remember = login_form()
+    if submitted:
+        if u == USERNAME and check_password(p, PASSWORD_HASH):
+            st.session_state.auth = True
+            if remember:
+                st.session_state.remember_until = str(dt.datetime.utcnow() + dt.timedelta(days=30))
+            st.experimental_rerun()
+        else:
+            st.error("Identifiants invalides")
+    st.stop()
+
+# ---------- UI une fois connecté ----------
+st.sidebar.success(f"Connecté comme {USERNAME}")
+if st.sidebar.button("Se déconnecter"):
+    st.session_state.clear()
+    st.experimental_rerun()
+
+st.title("Scanner d’opportunités – Daily")
+
+ticker = st.text_input("Ticker Yahoo Finance (ex: AAPL, OR.PA, MC.PA)", "AAPL")
+
+if ticker:
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if df.empty:
+            st.warning("Pas de données pour ce ticker.")
+        else:
+            # RSI simple (placeholder)
+            delta = df["Close"].diff()
+            up = delta.clip(lower=0)
+            down = -delta.clip(upper=0)
+            rs = up.rolling(14).mean() / down.rolling(14).mean()
+            df["RSI"] = 100 - (100 / (1 + rs))
+
+            st.subheader(f"{ticker} – Clôtures & RSI")
+            st.line_chart(df[["Close", "RSI"]])
+
+            st.write("Dernières valeurs :")
+            st.dataframe(df.tail(5))
+    except Exception as e:
+        st.error(f"Erreur de récupération des données : {e}")
