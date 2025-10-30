@@ -1,5 +1,5 @@
 streamlit
-streamlit-authenticator
 yfinance
 pandas
 numpy
+bcrypt
