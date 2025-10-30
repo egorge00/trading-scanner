@@ -312,6 +312,7 @@ with tab_scan:
             if res is not None:
                 rows.append(res)
         if rows:
+    if rows:
     df_out = (pd.DataFrame(rows)
               .sort_values(by=["Score","Ticker"], ascending=[False, True])
               .reset_index(drop=True))
@@ -328,18 +329,17 @@ with tab_scan:
     # --- Corbeille par ligne : suppression rapide depuis les résultats ---
     st.markdown("### 🗑️ Supprimer une valeur directement depuis les résultats")
     st.caption("Clique sur la corbeille pour retirer une valeur de **ta** watchlist, puis la page se relance.")
-    # on fabrique une petite liste avec boutons
+
     for i, r in df_out.iterrows():
         c1, c2, c3, c4 = st.columns([2, 6, 2, 2])
         with c1:
             st.write(f"**{r['Ticker']}**")
         with c2:
-            st.write(r.get("Name",""))
+            st.write(r.get("Name", ""))
         with c3:
             st.write(f"Score: {r['Score']}")
         with c4:
             if st.button("🗑️ Retirer", key=f"del_{i}_{r['Ticker']}"):
-                # supprime par ticker (ou ISIN associé si présent)
                 my_wl = load_my_watchlist()
                 before = len(my_wl)
                 my_wl = my_wl[my_wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(drop=True)
