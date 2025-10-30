@@ -9,7 +9,7 @@ st.set_page_config(page_title="Scanner", layout="wide")
 
 # ---- AUTHENTIFICATION ----
 USERNAME = "egorge"
-PASSWORD_HASH = "$2b$12$REPLACE_WITH_HASH"  # On mettra le vrai hash après
+PASSWORD_HASH = "$2y$12$8BCPvSkXXJeIRu1zn3DqDuNZUD5T1uxbAImQ7dj79joZ.kLwXI.2."  # On mettra le vrai hash après
 
 credentials = {
     "usernames": {
