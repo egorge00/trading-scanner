@@ -1,10 +1,10 @@
 name: Build Watchlist CSV
 
 on:
-  workflow_dispatch: {}   # <-- lancement manuel depuis l’onglet Actions
+  workflow_dispatch: {}   # lancement manuel depuis l’onglet Actions
 
 permissions:
-  contents: write         # <-- nécessaire pour git push avec GITHUB_TOKEN
+  contents: write         # git push avec GITHUB_TOKEN
 
 jobs:
   build:
@@ -25,9 +25,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests lxml html5lib
 
-      - name: Build CSV
+      - name: Build CSV (scrape indices)
         run: |
           python scripts/build_watchlist.py
+
+      - name: Show head/tail
+        run: |
+          python - << 'PY'
+          import pandas as pd
+          df = pd.read_csv("data/watchlist.csv")
+          print("Rows:", len(df))
+          print(df.head(10).to_string(index=False))
+          print(df.tail(10).to_string(index=False))
+          PY
 
       - name: Commit & push CSV (if changed)
         run: |
@@ -36,3 +46,9 @@ jobs:
           git add data/watchlist.csv
           git diff --cached --quiet || git commit -m "Build watchlist.csv (S&P500 + CAC40 + EURO STOXX 50 + FTSE100 + DAX40)"
           git push
+
+      - name: Upload CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchlist.csv
+          path: data/watchlist.csv
