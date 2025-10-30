@@ -185,9 +185,68 @@ def search_universe(query: str, topk: int = 50) -> pd.DataFrame:
     out = pd.concat([exact, contains, fuzzy], ignore_index=True).drop_duplicates(subset=["isin","ticker","name"])
     return out.head(topk)
 
-# ========= Onglets =========
-tab_scan, tab_single, tab_full = st.tabs(["🔎 Scanner (watchlist)", "📄 Fiche valeur", "🚀 Scanner complet"])
+# ========= Positions (CSV persistant en session) =========
+POSITIONS_KEY = "positions_df"
 
+def load_positions() -> pd.DataFrame:
+    if POSITIONS_KEY in st.session_state:
+        return st.session_state[POSITIONS_KEY].copy()
+    # structure: isin,ticker,opened_at,qty,entry_price,note,status
+    df = pd.DataFrame(columns=["isin","ticker","opened_at","qty","entry_price","note","status"])
+    # types
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+    df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce")
+    st.session_state[POSITIONS_KEY] = df.copy()
+    return df
+
+def save_positions(df: pd.DataFrame):
+    # normalisation légère
+    df = df.copy()
+    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
+    df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
+    df["opened_at"] = df["opened_at"].astype(str).str[:10]
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+    df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce")
+    df["note"] = df["note"].astype(str)
+    df["status"] = df["status"].astype(str).str.lower().replace({"ouvert":"open","fermé":"closed","close":"closed"})
+    st.session_state[POSITIONS_KEY] = df.copy()
+
+def export_positions_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode()
+
+@st.cache_data(show_spinner=False, ttl=30)
+def last_close(ticker: str) -> float | None:
+    try:
+        df = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=False)
+        if df is None or df.empty or "Close" not in df.columns: 
+            return None
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return None
+
+def compute_pnl_row(row: pd.Series) -> dict:
+    tkr = str(row.get("ticker","")).strip().upper()
+    qty = float(row.get("qty") or 0)
+    entry = float(row.get("entry_price") or 0)
+    lc = last_close(tkr) if tkr else None
+    if lc is None or qty == 0 or entry == 0:
+        return {"last": None, "pnl_abs": None, "pnl_pct": None}
+    pnl_abs = (lc - entry) * qty
+    pnl_pct = (lc/entry - 1.0) * 100.0
+    return {"last": lc, "pnl_abs": pnl_abs, "pnl_pct": pnl_pct}
+
+def signal_for_ticker(ticker: str) -> tuple[str, float] | None:
+    res = score_one(ticker)
+    if not res: 
+        return None
+    return res.get("Action",""), float(res.get("Score", 0))
+
+# ========= Onglets =========
+tab_scan, tab_single, tab_full, tab_pos = st.tabs(
+    ["🔎 Scanner (watchlist)", "📄 Fiche valeur", "🚀 Scanner complet", "💼 Positions"]
+)
 # --------- Onglet SCANNER (ma watchlist perso) ---------
 with tab_scan:
     st.title("Scanner — Ma watchlist (perso)")
@@ -377,3 +436,134 @@ with tab_full:
             )
         else:
             st.info("Aucun résultat (tickers invalides ou indisponibles).")
+
+# --------- Onglet 💼 POSITIONS ---------
+with tab_pos:
+    st.title("💼 Positions en cours")
+
+    pos = load_positions()
+
+    with st.expander("➕ Ajouter une position", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            add_query = st.text_input("Nom / ISIN / Ticker (pour auto-remplir)", "")
+            if st.button("🔎 Chercher dans la base"):
+                candidates = search_universe(add_query, topk=20)
+                if not candidates.empty:
+                    st.session_state["pos_candidates"] = candidates
+                else:
+                    st.warning("Aucune correspondance dans la base.")
+
+        candidates = st.session_state.get("pos_candidates")
+        if isinstance(candidates, pd.DataFrame) and not candidates.empty:
+            st.write("Sélectionne une ligne à préremplir :")
+            st.dataframe(candidates[["ticker","name","isin","market"]], use_container_width=True, height=220)
+            opt = candidates.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1).tolist()
+            choice = st.selectbox("Choix", [""] + opt)
+        else:
+            choice = ""
+
+        col4, col5, col6, col7 = st.columns(4)
+        with col4:
+            isin = st.text_input("ISIN", "")
+        with col5:
+            ticker_in = st.text_input("Ticker Yahoo", "")
+        with col6:
+            opened_at = st.date_input("Date d'entrée", value=dt.date.today())
+        with col7:
+            qty = st.number_input("Quantité", min_value=0.0, step=1.0, value=0.0)
+
+        col8, col9 = st.columns(2)
+        with col8:
+            entry = st.number_input("Prix d'entrée", min_value=0.0, step=0.01, value=0.00)
+        with col9:
+            note = st.text_input("Note (optionnel)", "")
+
+        if choice and st.button("📋 Préremplir depuis le choix"):
+            r = candidates.iloc[opt.index(choice)]
+            isin = r["isin"] or isin
+            ticker_in = r["ticker"] or ticker_in
+            st.session_state["prefill_isin"] = isin
+            st.session_state["prefill_ticker"] = ticker_in
+            st.experimental_rerun()
+
+        # recharger valeurs préremplies si présentes
+        isin = st.session_state.get("prefill_isin", isin)
+        ticker_in = st.session_state.get("prefill_ticker", ticker_in)
+
+        if st.button("➕ Ajouter la position"):
+            if not (isin or ticker_in):
+                st.warning("Renseigne au moins ISIN ou Ticker.")
+            else:
+                add = {
+                    "isin": str(isin).strip().upper(),
+                    "ticker": str(ticker_in).strip().upper(),
+                    "opened_at": str(opened_at),
+                    "qty": qty,
+                    "entry_price": entry,
+                    "note": note,
+                    "status": "open",
+                }
+                pos = pd.concat([pos, pd.DataFrame([add])], ignore_index=True)
+                pos = pos.drop_duplicates(subset=["isin","ticker","opened_at"], keep="last").reset_index(drop=True)
+                save_positions(pos)
+                st.success("Position ajoutée.")
+
+    st.markdown("---")
+    st.subheader("Positions ouvertes — P&L & signaux")
+
+    if pos.empty:
+        st.info("Aucune position pour l’instant.")
+    else:
+        # Calcul P&L + signal
+        rows = []
+        for _, r in pos[pos["status"].str.lower().eq("open")].iterrows():
+            pnl = compute_pnl_row(r)
+            sig = signal_for_ticker(str(r.get("ticker","")).strip().upper()) if str(r.get("ticker","")).strip() else None
+            rows.append({
+                "Ticker": str(r.get("ticker","")).strip().upper(),
+                "Name": get_name_for_ticker(str(r.get("ticker","")).strip().upper()),
+                "ISIN": str(r.get("isin","")).strip().upper(),
+                "Date entrée": r.get("opened_at",""),
+                "Qté": r.get("qty", None),
+                "Prix entrée": r.get("entry_price", None),
+                "Dernier": pnl["last"],
+                "PnL €": pnl["pnl_abs"],
+                "PnL %": pnl["pnl_pct"],
+                "Signal": (sig[0] if sig else ""),
+                "Score": (sig[1] if sig else None),
+                "Note": r.get("note",""),
+            })
+        if rows:
+            dfp = pd.DataFrame(rows)
+            # jolies colonnes
+            disp = dfp[["Ticker","Name","ISIN","Date entrée","Qté","Prix entrée","Dernier","PnL €","PnL %","Signal","Score","Note"]]
+            st.dataframe(disp, use_container_width=True)
+
+            # Actions rapides
+            st.markdown("### Actions rapides")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                to_close = st.selectbox("Clôturer une position (par ticker)", [""] + dfp["Ticker"].dropna().unique().tolist())
+                if st.button("✅ Marquer comme clôturée"):
+                    if to_close:
+                        pos.loc[pos["ticker"] == to_close, "status"] = "closed"
+                        save_positions(pos)
+                        st.success(f"{to_close} clôturée.")
+                        st.rerun()
+            with c2:
+                to_delete = st.selectbox("🗑️ Supprimer une ligne (par ticker)", [""] + dfp["Ticker"].dropna().unique().tolist())
+                if st.button("Supprimer définitivement"):
+                    if to_delete:
+                        before = len(pos)
+                        pos = pos[pos["ticker"] != to_delete].reset_index(drop=True)
+                        save_positions(pos)
+                        st.success(f"{to_delete} supprimé ({before - len(pos)} ligne).")
+                        st.rerun()
+            with c3:
+                st.download_button(
+                    "⬇️ Exporter positions (CSV)",
+                    data=export_positions_bytes(pos),
+                    file_name="positions.csv",
+                    mime="text/csv"
+                )
