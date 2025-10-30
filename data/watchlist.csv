@@ -1,6 +1,684 @@
-isin	ticker	name	market
-US0378331005	AAPL	Apple	US
-FR0000120321	OR.PA	L'Oreal	FR
-FR0000121014	MC.PA	LVMH	FR
-NL0000235190	AIR.PA	Airbus	FR
-LU1681043599	CW8		
+isin,ticker,name,market
+,MMM,3M,US
+,AOS,A. O. Smith,US
+,ABT,Abbott Laboratories,US
+,ABBV,AbbVie,US
+,ACN,Accenture,US
+,ADBE,Adobe Inc.,US
+,AMD,Advanced Micro Devices,US
+,AES,AES Corporation,US
+,AFL,Aflac,US
+,A,Agilent Technologies,US
+,APD,Air Products,US
+,ABNB,Airbnb,US
+,AKAM,Akamai Technologies,US
+,ALB,Albemarle Corporation,US
+,ARE,Alexandria Real Estate Equities,US
+,ALGN,Align Technology,US
+,ALLE,Allegion,US
+,LNT,Alliant Energy,US
+,ALL,Allstate,US
+,GOOGL,Alphabet Inc. (Class A),US
+,GOOG,Alphabet Inc. (Class C),US
+,MO,Altria,US
+,AMZN,Amazon,US
+,AMCR,Amcor,US
+,AEE,Ameren,US
+,AEP,American Electric Power,US
+,AXP,American Express,US
+,AIG,American International Group,US
+,AMT,American Tower,US
+,AWK,American Water Works,US
+,AMP,Ameriprise Financial,US
+,AME,Ametek,US
+,AMGN,Amgen,US
+,APH,Amphenol,US
+,ADI,Analog Devices,US
+,AON,Aon plc,US
+,APA,APA Corporation,US
+,APO,Apollo Global Management,US
+,AAPL,Apple Inc.,US
+,AMAT,Applied Materials,US
+,APP,AppLovin,US
+,APTV,Aptiv,US
+,ACGL,Arch Capital Group,US
+,ADM,Archer Daniels Midland,US
+,ANET,Arista Networks,US
+,AJG,Arthur J. Gallagher & Co.,US
+,AIZ,Assurant,US
+,T,AT&T,US
+,ATO,Atmos Energy,US
+,ADSK,Autodesk,US
+,ADP,Automatic Data Processing,US
+,AZO,AutoZone,US
+,AVB,AvalonBay Communities,US
+,AVY,Avery Dennison,US
+,AXON,Axon Enterprise,US
+,BKR,Baker Hughes,US
+,BALL,Ball Corporation,US
+,BAC,Bank of America,US
+,BAX,Baxter International,US
+,BDX,Becton Dickinson,US
+,BRK.B,Berkshire Hathaway,US
+,BBY,Best Buy,US
+,TECH,Bio-Techne,US
+,BIIB,Biogen,US
+,BLK,BlackRock,US
+,BX,Blackstone Inc.,US
+,XYZ,"Block, Inc.",US
+,BK,BNY Mellon,US
+,BA,Boeing,US
+,BKNG,Booking Holdings,US
+,BSX,Boston Scientific,US
+,BMY,Bristol Myers Squibb,US
+,AVGO,Broadcom,US
+,BR,Broadridge Financial Solutions,US
+,BRO,Brown & Brown,US
+,BF.B,Brown–Forman,US
+,BLDR,Builders FirstSource,US
+,BG,Bunge Global,US
+,BXP,"BXP, Inc.",US
+,CHRW,C.H. Robinson,US
+,CDNS,Cadence Design Systems,US
+,CPT,Camden Property Trust,US
+,CPB,Campbell's Company (The),US
+,COF,Capital One,US
+,CAH,Cardinal Health,US
+,KMX,CarMax,US
+,CCL,Carnival,US
+,CARR,Carrier Global,US
+,CAT,Caterpillar Inc.,US
+,CBOE,Cboe Global Markets,US
+,CBRE,CBRE Group,US
+,CDW,CDW Corporation,US
+,COR,Cencora,US
+,CNC,Centene Corporation,US
+,CNP,CenterPoint Energy,US
+,CF,CF Industries,US
+,CRL,Charles River Laboratories,US
+,SCHW,Charles Schwab Corporation,US
+,CHTR,Charter Communications,US
+,CVX,Chevron Corporation,US
+,CMG,Chipotle Mexican Grill,US
+,CB,Chubb Limited,US
+,CHD,Church & Dwight,US
+,CI,Cigna,US
+,CINF,Cincinnati Financial,US
+,CTAS,Cintas,US
+,CSCO,Cisco,US
+,C,Citigroup,US
+,CFG,Citizens Financial Group,US
+,CLX,Clorox,US
+,CME,CME Group,US
+,CMS,CMS Energy,US
+,KO,Coca-Cola Company (The),US
+,CTSH,Cognizant,US
+,COIN,Coinbase,US
+,CL,Colgate-Palmolive,US
+,CMCSA,Comcast,US
+,CAG,Conagra Brands,US
+,COP,ConocoPhillips,US
+,ED,Consolidated Edison,US
+,STZ,Constellation Brands,US
+,CEG,Constellation Energy,US
+,COO,Cooper Companies (The),US
+,CPRT,Copart,US
+,GLW,Corning Inc.,US
+,CPAY,Corpay,US
+,CTVA,Corteva,US
+,CSGP,CoStar Group,US
+,COST,Costco,US
+,CTRA,Coterra,US
+,CRWD,CrowdStrike,US
+,CCI,Crown Castle,US
+,CSX,CSX Corporation,US
+,CMI,Cummins,US
+,CVS,CVS Health,US
+,DHR,Danaher Corporation,US
+,DRI,Darden Restaurants,US
+,DDOG,Datadog,US
+,DVA,DaVita,US
+,DAY,Dayforce,US
+,DECK,Deckers Brands,US
+,DE,Deere & Company,US
+,DELL,Dell Technologies,US
+,DAL,Delta Air Lines,US
+,DVN,Devon Energy,US
+,DXCM,Dexcom,US
+,FANG,Diamondback Energy,US
+,DLR,Digital Realty,US
+,DG,Dollar General,US
+,DLTR,Dollar Tree,US
+,D,Dominion Energy,US
+,DPZ,Domino's,US
+,DASH,DoorDash,US
+,DOV,Dover Corporation,US
+,DOW,Dow Inc.,US
+,DHI,D. R. Horton,US
+,DTE,DTE Energy,US
+,DUK,Duke Energy,US
+,DD,DuPont,US
+,EMN,Eastman Chemical Company,US
+,ETN,Eaton Corporation,US
+,EBAY,eBay Inc.,US
+,ECL,Ecolab,US
+,EIX,Edison International,US
+,EW,Edwards Lifesciences,US
+,EA,Electronic Arts,US
+,ELV,Elevance Health,US
+,EME,Emcor,US
+,EMR,Emerson Electric,US
+,ETR,Entergy,US
+,EOG,EOG Resources,US
+,EPAM,EPAM Systems,US
+,EQT,EQT Corporation,US
+,EFX,Equifax,US
+,EQIX,Equinix,US
+,EQR,Equity Residential,US
+,ERIE,Erie Indemnity,US
+,ESS,Essex Property Trust,US
+,EL,Estée Lauder Companies (The),US
+,EG,Everest Group,US
+,EVRG,Evergy,US
+,ES,Eversource Energy,US
+,EXC,Exelon,US
+,EXE,Expand Energy,US
+,EXPE,Expedia Group,US
+,EXPD,Expeditors International,US
+,EXR,Extra Space Storage,US
+,XOM,ExxonMobil,US
+,FFIV,"F5, Inc.",US
+,FDS,FactSet,US
+,FICO,Fair Isaac,US
+,FAST,Fastenal,US
+,FRT,Federal Realty Investment Trust,US
+,FDX,FedEx,US
+,FIS,Fidelity National Information Services,US
+,FITB,Fifth Third Bancorp,US
+,FSLR,First Solar,US
+,FE,FirstEnergy,US
+,FI,Fiserv,US
+,F,Ford Motor Company,US
+,FTNT,Fortinet,US
+,FTV,Fortive,US
+,FOXA,Fox Corporation (Class A),US
+,FOX,Fox Corporation (Class B),US
+,BEN,Franklin Resources,US
+,FCX,Freeport-McMoRan,US
+,GRMN,Garmin,US
+,IT,Gartner,US
+,GE,GE Aerospace,US
+,GEHC,GE HealthCare,US
+,GEV,GE Vernova,US
+,GEN,Gen Digital,US
+,GNRC,Generac,US
+,GD,General Dynamics,US
+,GIS,General Mills,US
+,GM,General Motors,US
+,GPC,Genuine Parts Company,US
+,GILD,Gilead Sciences,US
+,GPN,Global Payments,US
+,GL,Globe Life,US
+,GDDY,GoDaddy,US
+,GS,Goldman Sachs,US
+,HAL,Halliburton,US
+,HIG,Hartford (The),US
+,HAS,Hasbro,US
+,HCA,HCA Healthcare,US
+,DOC,Healthpeak Properties,US
+,HSIC,Henry Schein,US
+,HSY,Hershey Company (The),US
+,HPE,Hewlett Packard Enterprise,US
+,HLT,Hilton Worldwide,US
+,HOLX,Hologic,US
+,HD,Home Depot (The),US
+,HON,Honeywell,US
+,HRL,Hormel Foods,US
+,HST,Host Hotels & Resorts,US
+,HWM,Howmet Aerospace,US
+,HPQ,HP Inc.,US
+,HUBB,Hubbell Incorporated,US
+,HUM,Humana,US
+,HBAN,Huntington Bancshares,US
+,HII,Huntington Ingalls Industries,US
+,IBM,IBM,US
+,IEX,IDEX Corporation,US
+,IDXX,Idexx Laboratories,US
+,ITW,Illinois Tool Works,US
+,INCY,Incyte,US
+,IR,Ingersoll Rand,US
+,PODD,Insulet Corporation,US
+,INTC,Intel,US
+,IBKR,Interactive Brokers,US
+,ICE,Intercontinental Exchange,US
+,IFF,International Flavors & Fragrances,US
+,IP,International Paper,US
+,IPG,Interpublic Group of Companies (The),US
+,INTU,Intuit,US
+,ISRG,Intuitive Surgical,US
+,IVZ,Invesco,US
+,INVH,Invitation Homes,US
+,IQV,IQVIA,US
+,IRM,Iron Mountain,US
+,JBHT,J.B. Hunt,US
+,JBL,Jabil,US
+,JKHY,Jack Henry & Associates,US
+,J,Jacobs Solutions,US
+,JNJ,Johnson & Johnson,US
+,JCI,Johnson Controls,US
+,JPM,JPMorgan Chase,US
+,K,Kellanova,US
+,KVUE,Kenvue,US
+,KDP,Keurig Dr Pepper,US
+,KEY,KeyCorp,US
+,KEYS,Keysight Technologies,US
+,KMB,Kimberly-Clark,US
+,KIM,Kimco Realty,US
+,KMI,Kinder Morgan,US
+,KKR,KKR & Co.,US
+,KLAC,KLA Corporation,US
+,KHC,Kraft Heinz,US
+,KR,Kroger,US
+,LHX,L3Harris,US
+,LH,Labcorp,US
+,LRCX,Lam Research,US
+,LW,Lamb Weston,US
+,LVS,Las Vegas Sands,US
+,LDOS,Leidos,US
+,LEN,Lennar,US
+,LII,Lennox International,US
+,LLY,Lilly (Eli),US
+,LIN,Linde plc,US
+,LYV,Live Nation Entertainment,US
+,LKQ,LKQ Corporation,US
+,LMT,Lockheed Martin,US
+,L,Loews Corporation,US
+,LOW,Lowe's,US
+,LULU,Lululemon Athletica,US
+,LYB,LyondellBasell,US
+,MTB,M&T Bank,US
+,MPC,Marathon Petroleum,US
+,MAR,Marriott International,US
+,MMC,Marsh McLennan,US
+,MLM,Martin Marietta Materials,US
+,MAS,Masco,US
+,MA,Mastercard,US
+,MTCH,Match Group,US
+,MKC,McCormick & Company,US
+,MCD,McDonald's,US
+,MCK,McKesson Corporation,US
+,MDT,Medtronic,US
+,MRK,Merck & Co.,US
+,META,Meta Platforms,US
+,MET,MetLife,US
+,MTD,Mettler Toledo,US
+,MGM,MGM Resorts,US
+,MCHP,Microchip Technology,US
+,MU,Micron Technology,US
+,MSFT,Microsoft,US
+,MAA,Mid-America Apartment Communities,US
+,MRNA,Moderna,US
+,MHK,Mohawk Industries,US
+,MOH,Molina Healthcare,US
+,TAP,Molson Coors Beverage Company,US
+,MDLZ,Mondelez International,US
+,MPWR,Monolithic Power Systems,US
+,MNST,Monster Beverage,US
+,MCO,Moody's Corporation,US
+,MS,Morgan Stanley,US
+,MOS,Mosaic Company (The),US
+,MSI,Motorola Solutions,US
+,MSCI,MSCI Inc.,US
+,NDAQ,"Nasdaq, Inc.",US
+,NTAP,NetApp,US
+,NFLX,Netflix,US
+,NEM,Newmont,US
+,NWSA,News Corp (Class A),US
+,NWS,News Corp (Class B),US
+,NEE,NextEra Energy,US
+,NKE,"Nike, Inc.",US
+,NI,NiSource,US
+,NDSN,Nordson Corporation,US
+,NSC,Norfolk Southern,US
+,NTRS,Northern Trust,US
+,NOC,Northrop Grumman,US
+,NCLH,Norwegian Cruise Line Holdings,US
+,NRG,NRG Energy,US
+,NUE,Nucor,US
+,NVDA,Nvidia,US
+,NVR,"NVR, Inc.",US
+,NXPI,NXP Semiconductors,US
+,ORLY,O’Reilly Automotive,US
+,OXY,Occidental Petroleum,US
+,ODFL,Old Dominion,US
+,OMC,Omnicom Group,US
+,ON,ON Semiconductor,US
+,OKE,Oneok,US
+,ORCL,Oracle Corporation,US
+,OTIS,Otis Worldwide,US
+,PCAR,Paccar,US
+,PKG,Packaging Corporation of America,US
+,PLTR,Palantir Technologies,US
+,PANW,Palo Alto Networks,US
+,PSKY,Paramount Skydance Corporation,US
+,PH,Parker Hannifin,US
+,PAYX,Paychex,US
+,PAYC,Paycom,US
+,PYPL,PayPal,US
+,PNR,Pentair,US
+,PEP,PepsiCo,US
+,PFE,Pfizer,US
+,PCG,PG&E Corporation,US
+,PM,Philip Morris International,US
+,PSX,Phillips 66,US
+,PNW,Pinnacle West Capital,US
+,PNC,PNC Financial Services,US
+,POOL,Pool Corporation,US
+,PPG,PPG Industries,US
+,PPL,PPL Corporation,US
+,PFG,Principal Financial Group,US
+,PG,Procter & Gamble,US
+,PGR,Progressive Corporation,US
+,PLD,Prologis,US
+,PRU,Prudential Financial,US
+,PEG,Public Service Enterprise Group,US
+,PTC,PTC Inc.,US
+,PSA,Public Storage,US
+,PHM,PulteGroup,US
+,PWR,Quanta Services,US
+,QCOM,Qualcomm,US
+,DGX,Quest Diagnostics,US
+,RL,Ralph Lauren Corporation,US
+,RJF,Raymond James Financial,US
+,RTX,RTX Corporation,US
+,O,Realty Income,US
+,REG,Regency Centers,US
+,REGN,Regeneron Pharmaceuticals,US
+,RF,Regions Financial Corporation,US
+,RSG,Republic Services,US
+,RMD,ResMed,US
+,RVTY,Revvity,US
+,HOOD,Robinhood Markets,US
+,ROK,Rockwell Automation,US
+,ROL,"Rollins, Inc.",US
+,ROP,Roper Technologies,US
+,ROST,Ross Stores,US
+,RCL,Royal Caribbean Group,US
+,SPGI,S&P Global,US
+,CRM,Salesforce,US
+,SBAC,SBA Communications,US
+,SLB,Schlumberger,US
+,STX,Seagate Technology,US
+,SRE,Sempra,US
+,NOW,ServiceNow,US
+,SHW,Sherwin-Williams,US
+,SPG,Simon Property Group,US
+,SWKS,Skyworks Solutions,US
+,SJM,J.M. Smucker Company (The),US
+,SW,Smurfit Westrock,US
+,SNA,Snap-on,US
+,SOLV,Solventum,US
+,SO,Southern Company,US
+,LUV,Southwest Airlines,US
+,SWK,Stanley Black & Decker,US
+,SBUX,Starbucks,US
+,STT,State Street Corporation,US
+,STLD,Steel Dynamics,US
+,STE,Steris,US
+,SYK,Stryker Corporation,US
+,SMCI,Supermicro,US
+,SYF,Synchrony Financial,US
+,SNPS,Synopsys,US
+,SYY,Sysco,US
+,TMUS,T-Mobile US,US
+,TROW,T. Rowe Price,US
+,TTWO,Take-Two Interactive,US
+,TPR,"Tapestry, Inc.",US
+,TRGP,Targa Resources,US
+,TGT,Target Corporation,US
+,TEL,TE Connectivity,US
+,TDY,Teledyne Technologies,US
+,TER,Teradyne,US
+,TSLA,"Tesla, Inc.",US
+,TXN,Texas Instruments,US
+,TPL,Texas Pacific Land Corporation,US
+,TXT,Textron,US
+,TMO,Thermo Fisher Scientific,US
+,TJX,TJX Companies,US
+,TKO,TKO Group Holdings,US
+,TTD,Trade Desk (The),US
+,TSCO,Tractor Supply,US
+,TT,Trane Technologies,US
+,TDG,TransDigm Group,US
+,TRV,Travelers Companies (The),US
+,TRMB,Trimble Inc.,US
+,TFC,Truist Financial,US
+,TYL,Tyler Technologies,US
+,TSN,Tyson Foods,US
+,USB,U.S. Bancorp,US
+,UBER,Uber,US
+,UDR,"UDR, Inc.",US
+,ULTA,Ulta Beauty,US
+,UNP,Union Pacific Corporation,US
+,UAL,United Airlines Holdings,US
+,UPS,United Parcel Service,US
+,URI,United Rentals,US
+,UNH,UnitedHealth Group,US
+,UHS,Universal Health Services,US
+,VLO,Valero Energy,US
+,VTR,Ventas,US
+,VLTO,Veralto,US
+,VRSN,Verisign,US
+,VRSK,Verisk Analytics,US
+,VZ,Verizon,US
+,VRTX,Vertex Pharmaceuticals,US
+,VTRS,Viatris,US
+,VICI,Vici Properties,US
+,V,Visa Inc.,US
+,VST,Vistra Corp.,US
+,VMC,Vulcan Materials Company,US
+,WRB,W. R. Berkley Corporation,US
+,GWW,W. W. Grainger,US
+,WAB,Wabtec,US
+,WMT,Walmart,US
+,DIS,Walt Disney Company (The),US
+,WBD,Warner Bros. Discovery,US
+,WM,Waste Management,US
+,WAT,Waters Corporation,US
+,WEC,WEC Energy Group,US
+,WFC,Wells Fargo,US
+,WELL,Welltower,US
+,WST,West Pharmaceutical Services,US
+,WDC,Western Digital,US
+,WY,Weyerhaeuser,US
+,WSM,"Williams-Sonoma, Inc.",US
+,WMB,Williams Companies,US
+,WTW,Willis Towers Watson,US
+,WDAY,"Workday, Inc.",US
+,WYNN,Wynn Resorts,US
+,XEL,Xcel Energy,US
+,XYL,Xylem Inc.,US
+,YUM,Yum! Brands,US
+,ZBRA,Zebra Technologies,US
+,ZBH,Zimmer Biomet,US
+,ZTS,Zoetis,US
+,AC.PA,Accor,FR
+,AI.PA,Air Liquide,FR
+,AIR.PA,Airbus,FR
+,MT.AS,ArcelorMittal,FR
+,CS.PA,Axa,FR
+,BNP.PA,BNP Paribas,FR
+,EN.PA,Bouygues,FR
+,BVI.PA,Bureau Veritas,FR
+,CAP.PA,Capgemini,FR
+,CA.PA,Carrefour,FR
+,ACA.PA,Crédit Agricole,FR
+,BN.PA,Danone,FR
+,DSY.PA,Dassault Systèmes,FR
+,EDEN.PA,Edenred,FR
+,ENGI.PA,Engie,FR
+,EL.PA,EssilorLuxottica,FR
+,ERF.PA,Eurofins Scientific,FR
+,RMS.PA,Hermès,FR
+,KER.PA,Kering,FR
+,OR.PA,L'Oréal,FR
+,LR.PA,Legrand,FR
+,MC.PA,LVMH,FR
+,ML.PA,Michelin,FR
+,ORA.PA,Orange,FR
+,RI.PA,Pernod Ricard,FR
+,PUB.PA,Publicis,FR
+,RNO.PA,Renault,FR
+,SAF.PA,Safran,FR
+,SGO.PA,Saint-Gobain,FR
+,SAN.PA,Sanofi,FR
+,SU.PA,Schneider Electric,FR
+,GLE.PA,Société Générale,FR
+,STLAP.PA,Stellantis,FR
+,STMPA.PA,STMicroelectronics,FR
+,TEP.PA,Teleperformance,FR
+,HO.PA,Thales,FR
+,TTE.PA,TotalEnergies,FR
+,URW.PA,Unibail-Rodamco-Westfield,FR
+,VIE.PA,Veolia,FR
+,DG.PA,Vinci,FR
+,III.L,3i,UK
+,ADM.L,Admiral Group,UK
+,AAF.L,Airtel Africa,UK
+,ALW.L,Alliance Witan,UK
+,AAL.L,Anglo American plc,UK
+,ANTO.L,Antofagasta plc,UK
+,AHT.L,Ashtead Group,UK
+,ABF.L,Associated British Foods,UK
+,AZN.L,AstraZeneca,UK
+,AUTO.L,Auto Trader Group,UK
+,AV.L,Aviva,UK
+,BAB.L,Babcock International,UK
+,BA.L,BAE Systems,UK
+,BARC.L,Barclays,UK
+,BTRW.L,Barratt Redrow,UK
+,BEZ.L,Beazley,UK
+,BKG.L,Berkeley Group Holdings,UK
+,BP.L,BP,UK
+,BATS.L,British American Tobacco,UK
+,BT-A.L,BT Group,UK
+,BNZL.L,Bunzl,UK
+,BRBY.L,Burberry Group,UK
+,CNA.L,Centrica,UK
+,CCEP.L,Coca-Cola Europacific Partners,UK
+,CCH.L,Coca-Cola HBC,UK
+,CPG.L,Compass Group,UK
+,CTEC.L,Convatec,UK
+,CRDA.L,Croda International,UK
+,DCC.L,DCC plc,UK
+,DGE.L,Diageo,UK
+,DPLM.L,Diploma,UK
+,EDV.L,Endeavour Mining,UK
+,ENT.L,Entain,UK
+,EZJ.L,EasyJet,UK
+,EXPN.L,Experian,UK
+,FCIT.L,F & C Investment Trust,UK
+,FRES.L,Fresnillo plc,UK
+,GAW.L,Games Workshop,UK
+,GLEN.L,Glencore,UK
+,GSK.L,GSK plc,UK
+,HLN.L,Haleon,UK
+,HLMA.L,Halma plc,UK
+,HIK.L,Hikma Pharmaceuticals,UK
+,HSX.L,Hiscox,UK
+,HWDN.L,Howdens Joinery,UK
+,HSBA.L,HSBC,UK
+,ICG.L,ICG,UK
+,IHG.L,IHG Hotels & Resorts,UK
+,IMI.L,IMI,UK
+,IMB.L,Imperial Brands,UK
+,INF.L,Informa,UK
+,IAG.L,International Airlines Group,UK
+,ITRK.L,Intertek,UK
+,JD.L,JD Sports,UK
+,KGF.L,Kingfisher plc,UK
+,LAND.L,Land Securities,UK
+,LGEN.L,Legal & General,UK
+,LLOY.L,Lloyds Banking Group,UK
+,LMP.L,LondonMetric Property,UK
+,LSEG.L,London Stock Exchange Group,UK
+,MNG.L,M&G,UK
+,MKS.L,Marks & Spencer,UK
+,MRO.L,Melrose Industries,UK
+,MTLN.L,Metlen Energy & Metals,UK
+,MNDI.L,Mondi,UK
+,NG.L,National Grid plc,UK
+,NWG.L,NatWest Group,UK
+,NXT.L,Next plc,UK
+,PSON.L,Pearson plc,UK
+,PSH.L,Pershing Square Holdings,UK
+,PSN.L,Persimmon,UK
+,PHNX.L,Phoenix Group,UK
+,PCT.L,Polar Capital Technology Trust,UK
+,PRU.L,Prudential plc,UK
+,RKT.L,Reckitt,UK
+,REL.L,RELX,UK
+,RTO.L,Rentokil Initial,UK
+,RMV.L,Rightmove,UK
+,RIO.L,Rio Tinto,UK
+,RR.L,Rolls-Royce Holdings,UK
+,SGE.L,Sage Group,UK
+,SBRY.L,Sainsbury's,UK
+,SDR.L,Schroders,UK
+,SMT.L,Scottish Mortgage Investment Trust,UK
+,SGRO.L,Segro,UK
+,SVT.L,Severn Trent,UK
+,SHEL.L,Shell plc,UK
+,SMIN.L,Smiths Group,UK
+,SN.L,Smith & Nephew,UK
+,SPX.L,Spirax Group,UK
+,SSE.L,SSE plc,UK
+,STAN.L,Standard Chartered,UK
+,STJ.L,St. James's Place,UK
+,TSCO.L,Tesco,UK
+,ULVR.L,Unilever,UK
+,UU.L,United Utilities,UK
+,VOD.L,Vodafone Group,UK
+,WEIR.L,Weir Group,UK
+,WTB.L,Whitbread,UK
+,WPP.L,WPP,UK
+,ADS.DE,Adidas,DE
+,ALV.DE,Allianz,DE
+,BAS.DE,BASF,DE
+,BAYN.DE,Bayer,DE
+,BEI.DE,Beiersdorf,DE
+,BMW.DE,BMW,DE
+,BNR.DE,Brenntag,DE
+,CBK.DE,Commerzbank,DE
+,CON.DE,Continental,DE
+,1COV.DE,Covestro,DE
+,DTG.DE,Daimler Truck,DE
+,DBK.DE,Deutsche Bank,DE
+,DB1.DE,Deutsche Börse,DE
+,DHL.DE,Deutsche Post,DE
+,DTE.DE,Deutsche Telekom,DE
+,EOAN.DE,E.ON,DE
+,FRE.DE,Fresenius,DE
+,FME.DE,Fresenius Medical Care,DE
+,HNR1.DE,Hannover Re,DE
+,HEI.DE,Heidelberg Materials,DE
+,HEN3.DE,Henkel,DE
+,IFX.DE,Infineon Technologies,DE
+,MBG.DE,Mercedes-Benz Group,DE
+,MRK.DE,Merck,DE
+,MTX.DE,MTU Aero Engines,DE
+,MUV2.DE,Munich Re,DE
+,P911.DE,Porsche,DE
+,PAH3.DE,Porsche SE,DE
+,QIA.DE,Qiagen,DE
+,RHM.DE,Rheinmetall,DE
+,RWE.DE,RWE,DE
+,SAP.DE,SAP,DE
+,SRT3.DE,Sartorius,DE
+,SIE.DE,Siemens,DE
+,ENR.DE,Siemens Energy,DE
+,SHL.DE,Siemens Healthineers,DE
+,SY1.DE,Symrise,DE
+,VOW3.DE,Volkswagen Group,DE
+,VNA.DE,Vonovia,DE
+,ZAL.DE,Zalando,DE
