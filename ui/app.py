@@ -105,6 +105,24 @@ def export_watchlist_csv_bytes(df: pd.DataFrame) -> bytes:
     df.to_csv(buf, index=False)
     return buf.getvalue().encode()
 
+def get_name_map() -> dict:
+    """Map ticker -> name basé sur la watchlist en session."""
+    wl = st.session_state.get("watchlist_df")
+    if wl is None:
+        wl = load_watchlist()
+    mp = {}
+    for _, r in wl.iterrows():
+        t = str(r.get("ticker","")).strip().upper()
+        n = str(r.get("name","")).strip()
+        if t:
+            mp[t] = n
+    return mp
+
+NAME_MAP = get_name_map()
+
+def get_name_for_ticker(tkr: str) -> str:
+    return NAME_MAP.get(str(tkr).strip().upper(), "")
+
 def load_isin_map() -> dict:
     m = {}
     df = load_csv_safe(ISIN_MAP_PATH, ["isin","ticker"])
