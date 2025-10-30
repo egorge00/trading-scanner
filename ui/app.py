@@ -37,7 +37,7 @@ if not st.session_state.auth:
             st.session_state.auth = True
             if remember:
                 st.session_state.remember_until = str(dt.datetime.utcnow() + dt.timedelta(days=30))
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Identifiants invalides")
     st.stop()
@@ -46,7 +46,7 @@ if not st.session_state.auth:
 st.sidebar.success(f"Connecté comme {USERNAME}")
 if st.sidebar.button("Se déconnecter"):
     st.session_state.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 st.title("Scanner d’opportunités – Daily")
 
