@@ -1,5 +1,5 @@
-ticker,name,market
-AAPL,Apple,US
-OR.PA,L'Oreal,FR
-MC.PA,LVMH,FR
-AIR.PA,Airbus,FR
+isin,ticker,name,market
+US0378331005,AAPL,Apple,US
+FR0000120321,OR.PA,L'Oreal,FR
+FR0000121014,MC.PA,LVMH,FR
+NL0000235190,AIR.PA,Airbus,FR
