@@ -4,6 +4,9 @@ import bcrypt
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import sys, os
+# permettre d'importer depuis la racine du repo (parent de /ui)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # ----- IMPORT MOTEUR KPI/SCORE -----
 from api.core.scoring import compute_kpis, compute_score
