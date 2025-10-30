@@ -10,6 +10,7 @@ import yfinance as yf
 # --- rendre importable le package "api" depuis /ui ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from api.core.scoring import compute_kpis, compute_score
+from api.core.isin_resolver import resolve_isin_to_ticker
 
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Scanner", layout="wide")
