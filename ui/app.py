@@ -2,6 +2,7 @@ import os
 import sys
 import io
 import time
+import difflib
 import datetime as dt
 import bcrypt
 import pandas as pd
@@ -21,7 +22,7 @@ st.set_page_config(page_title="Scanner", layout="wide")
 USERNAME = "egorge"
 PASSWORD_HASH = os.getenv(
     "PASSWORD_HASH",
-    "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe"  # <-- remplace si besoin
+    "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe"
 )
 
 def login_form():
@@ -60,80 +61,73 @@ if st.sidebar.button("Se déconnecter"):
     st.session_state.clear()
     st.rerun()
 
-# ========= Helpers Watchlist (ISIN clé primaire) =========
-WATCHLIST_PATH = "data/watchlist.csv"
-ISIN_MAP_PATH = "data/isin_map.csv"
+# ========= FICHIERS =========
+UNIVERSE_PATH = "data/watchlist.csv"   # tout l'univers (indices)
+MY_WATCHLIST_KEY = "my_watchlist_df"   # watchlist perso en session
 
-DEFAULT_WATCHLIST = pd.DataFrame([
-    {"isin":"US0378331005","ticker":"AAPL","name":"Apple","market":"US"},
-    {"isin":"FR0000120321","ticker":"OR.PA","name":"L'Oreal","market":"FR"},
-    {"isin":"FR0000121014","ticker":"MC.PA","name":"LVMH","market":"FR"},
-    {"isin":"NL0000235190","ticker":"AIR.PA","name":"Airbus","market":"FR"},
-])
+# ========= Helpers CSV =========
+def normalize_cols(df: pd.DataFrame, expected=("isin","ticker","name","market")) -> pd.DataFrame:
+    lower = [c.lower() for c in df.columns]
+    mapping = {lc: c for lc, c in zip(lower, df.columns)}
+    out = df.rename(columns={mapping.get("isin","isin"):"isin",
+                             mapping.get("ticker","ticker"):"ticker",
+                             mapping.get("name","name"):"name",
+                             mapping.get("market","market"):"market"}).copy()
+    for c in expected:
+        if c not in out.columns:
+            out[c] = ""
+    out["isin"]   = out["isin"].astype(str).str.strip().str.upper()
+    out["ticker"] = out["ticker"].astype(str).str.strip().str.upper()
+    out["name"]   = out["name"].astype(str).str.strip()
+    out["market"] = out["market"].astype(str).str.strip()
+    return out[list(expected)]
 
-def load_csv_safe(path: str, expected_cols: list[str]) -> pd.DataFrame|None:
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_universe() -> pd.DataFrame:
     try:
-        if not os.path.exists(path):
-            return None
-        df = pd.read_csv(path)
-        lower = [c.lower() for c in df.columns]
-        mapping = {lc: c for lc, c in zip(lower, df.columns)}
-        if not all(c in lower for c in [c.lower() for c in expected_cols]):
-            return None
-        return df.rename(columns={mapping[c.lower()]: c for c in expected_cols})
+        df = pd.read_csv(UNIVERSE_PATH)
+        return normalize_cols(df)
     except Exception:
-        return None
+        # fallback minimal
+        return normalize_cols(pd.DataFrame([
+            {"isin":"US0378331005","ticker":"AAPL","name":"Apple","market":"US"},
+            {"isin":"FR0000120321","ticker":"OR.PA","name":"L'Oreal","market":"FR"},
+        ]))
 
-def load_watchlist() -> pd.DataFrame:
-    if "watchlist_df" in st.session_state:
-        return st.session_state.watchlist_df.copy()
-    df = load_csv_safe(WATCHLIST_PATH, ["isin","ticker","name","market"])
-    if df is None:
-        df = DEFAULT_WATCHLIST.copy()
-    df["isin"]   = df["isin"].astype(str).str.strip().str.upper()
-    df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
-    df["name"]   = df["name"].astype(str).str.strip()
-    df["market"] = df["market"].astype(str).str.strip()
-    st.session_state.watchlist_df = df
-    return df.copy()
+def load_my_watchlist() -> pd.DataFrame:
+    if MY_WATCHLIST_KEY in st.session_state:
+        return st.session_state[MY_WATCHLIST_KEY].copy()
+    # par défaut vide (tu ajoutes depuis l'univers)
+    df = normalize_cols(pd.DataFrame(columns=["isin","ticker","name","market"]))
+    st.session_state[MY_WATCHLIST_KEY] = df.copy()
+    return df
 
-def save_watchlist_to_session(df: pd.DataFrame):
-    st.session_state.watchlist_df = df.copy()
+def save_my_watchlist(df: pd.DataFrame):
+    st.session_state[MY_WATCHLIST_KEY] = normalize_cols(df)
 
-def export_watchlist_csv_bytes(df: pd.DataFrame) -> bytes:
+def export_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode()
 
-def load_isin_map() -> dict:
-    m = {}
-    df = load_csv_safe(ISIN_MAP_PATH, ["isin","ticker"])
-    if df is not None:
-        for _, r in df.iterrows():
-            m[str(r["isin"]).strip().upper()] = str(r["ticker"]).strip().upper()
-    return m
-
-ISIN_MAP = load_isin_map()
-
-# ---- Name map (Ticker -> Name) pour affichage ----
-def get_name_map() -> dict:
-    wl = st.session_state.get("watchlist_df")
-    if wl is None:
-        wl = load_watchlist()
+# ---- Name map basé sur l'univers (pour avoir les noms partout) ----
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_name_map_from_universe() -> dict:
+    uni = load_universe()
     mp = {}
-    for _, r in wl.iterrows():
+    for _, r in uni.iterrows():
         t = str(r.get("ticker","")).strip().upper()
         n = str(r.get("name","")).strip()
-        if t:
+        if t and n:
             mp[t] = n
     return mp
 
-NAME_MAP = get_name_map()
+NAME_MAP = get_name_map_from_universe()
 
 def get_name_for_ticker(tkr: str) -> str:
     return NAME_MAP.get(str(tkr).strip().upper(), "")
 
-# ========= Données marché =========
+# ========= Données marché + scoring =========
 @st.cache_data(show_spinner=False, ttl=60*60)
 def fetch_df_cached(ticker: str) -> pd.DataFrame | None:
     try:
@@ -146,7 +140,7 @@ def fetch_df_cached(ticker: str) -> pd.DataFrame | None:
                 df.columns = df.columns.get_level_values(0)
             except Exception:
                 df = df.droplevel(1, axis=1)
-        needed = {"Open", "High", "Low", "Close", "Volume"}
+        needed = {"Open","High","Low","Close","Volume"}
         if df.empty or not needed.issubset(df.columns):
             return None
         return df
@@ -162,7 +156,7 @@ def score_one(ticker: str):
         s = compute_score(k)
         return {
             "Ticker": ticker,
-            "Name": get_name_for_ticker(ticker),  # <--- colonne Name
+            "Name": get_name_for_ticker(ticker),
             "Score": s.score,
             "Action": s.action,
             "RSI": round(k.rsi, 1),
@@ -175,107 +169,145 @@ def score_one(ticker: str):
     except Exception:
         return None
 
-def resolve_and_update_row(wl: pd.DataFrame, isin: str, name: str) -> tuple[pd.DataFrame, str|None]:
-    tkr = resolve_isin_to_ticker(isin, name_hint=name or None)
-    if tkr:
-        wl.loc[wl["isin"] == isin, "ticker"] = tkr
-        save_watchlist_to_session(wl)
-        # refresh du name map
-        global NAME_MAP
-        NAME_MAP = get_name_map()
-        return wl, tkr
-    return wl, None
+# ========= Recherche dans l'univers (nom / isin / ticker) =========
+def search_universe(query: str, topk: int = 50) -> pd.DataFrame:
+    uni = load_universe()
+    q = (query or "").strip()
+    if not q:
+        return uni.head(0)
+    q_upper = q.upper()
+    q_lower = q.lower()
 
-# ========== ONGLETS ==========
+    # 1) matches exacts très prioritaires
+    exact = uni[(uni["ticker"] == q_upper) | (uni["isin"] == q_upper) | (uni["name"].str.lower() == q_lower)]
+
+    # 2) contient
+    contains = uni[
+        uni["ticker"].str.contains(q_upper, na=False) |
+        uni["isin"].str.contains(q_upper, na=False) |
+        uni["name"].str.lower().str.contains(q_lower, na=False)
+    ]
+
+    # 3) fuzzy (sur le nom) avec difflib
+    names = uni["name"].dropna().astype(str).tolist()
+    fuzz = difflib.get_close_matches(q, names, n=topk, cutoff=0.6)
+    fuzzy = uni[uni["name"].isin(fuzz)]
+
+    out = pd.concat([exact, contains, fuzzy], ignore_index=True).drop_duplicates(subset=["isin","ticker","name"])
+    # limiter
+    return out.head(topk)
+
+# ========= Onglets =========
 tab_scan, tab_single, tab_full = st.tabs(["🔎 Scanner (watchlist)", "📄 Fiche valeur", "🚀 Scanner complet"])
 
-# --------- Onglet SCANNER (watchlist ISIN) ---------
+# --------- Onglet SCANNER (ma watchlist perso) ---------
 with tab_scan:
-    st.title("Scanner — Watchlist (ISIN)")
-    wl = load_watchlist()
+    st.title("Scanner — Ma watchlist (perso)")
+    st.caption("Ici tu gères **ta** liste perso. Ajoute depuis la base (univers complet) ou manuellement, puis scanne uniquement ces valeurs.")
 
-    with st.expander("➕ Ajouter / ➖ Supprimer / 🔍 Résoudre (clé ISIN)", expanded=False):
+    my_wl = load_my_watchlist()
+    uni = load_universe()
+
+    with st.expander("📥 Ajouter depuis la base (nom / ISIN / ticker)", expanded=True):
+        q = st.text_input("Rechercher dans la base (nom, ISIN, ticker)", "")
+        results = search_universe(q, topk=50) if q.strip() else uni.head(0)
+        if not results.empty:
+            st.dataframe(results[["ticker","name","isin","market"]], use_container_width=True, height=260)
+            # sélection des lignes à ajouter
+            options = results.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1).tolist()
+            pick = st.multiselect("Sélectionne ce que tu veux ajouter à ta watchlist", options)
+            if st.button("➕ Ajouter la sélection à ma watchlist"):
+                to_add = []
+                # reconstruire depuis la string
+                lookup = {(f"{r['ticker']} — {r['name']} ({r['isin']})"): r for _, r in results.iterrows()}
+                for p in pick:
+                    r = lookup.get(p)
+                    if r is not None:
+                        to_add.append({"isin":r["isin"],"ticker":r["ticker"],"name":r["name"],"market":r["market"]})
+                if to_add:
+                    add_df = normalize_cols(pd.DataFrame(to_add))
+                    my_wl = pd.concat([my_wl, add_df], ignore_index=True)
+                    my_wl = my_wl.drop_duplicates(subset=["isin","ticker"]).reset_index(drop=True)
+                    save_my_watchlist(my_wl)
+                    st.success(f"{len(to_add)} valeur(s) ajoutée(s) à ta watchlist.")
+        else:
+            st.info("Tape un nom, un ISIN ou un ticker pour rechercher dans la base.")
+
+    with st.expander("➕ Ajouter / ➖ Supprimer (manuel) / 🔍 Résoudre (clé ISIN)", expanded=False):
         colA, colB, colC = st.columns(3)
-
-        # --- Ajouter ---
+        # --- Ajouter manuel ---
         with colA:
-            st.markdown("**Ajouter par ISIN**")
-            new_isin = st.text_input("ISIN (obligatoire)", key="add_isin")
-            new_name = st.text_input("Nom (optionnel)", key="add_name")
-            new_mkt  = st.text_input("Marché (optionnel)", key="add_mkt")
-            new_ticker = st.text_input("Ticker Yahoo (si connu)", key="add_ticker")
-
-            if st.button("Ajouter à la watchlist"):
-                if new_isin.strip():
+            st.markdown("**Ajouter (manuel)**")
+            new_isin = st.text_input("ISIN", key="add_isin_manual")
+            new_name = st.text_input("Nom (optionnel)", key="add_name_manual")
+            new_mkt  = st.text_input("Marché (optionnel)", key="add_mkt_manual")
+            new_ticker = st.text_input("Ticker Yahoo (si connu)", key="add_ticker_manual")
+            if st.button("Ajouter à ma watchlist (manuel)"):
+                if new_isin.strip() or new_ticker.strip():
                     isin = new_isin.strip().upper()
                     ticker = new_ticker.strip().upper()
-                    if not ticker:
+                    if not ticker and isin:
                         t = resolve_isin_to_ticker(isin, name_hint=new_name or None)
                         if t:
                             ticker = t
                     add = {"isin": isin, "ticker": ticker, "name": (new_name or "").strip(), "market": (new_mkt or "").strip()}
-                    wl = pd.concat([wl, pd.DataFrame([add])], ignore_index=True)
-                    wl = wl.drop_duplicates(subset=["isin"]).reset_index(drop=True)
-                    save_watchlist_to_session(wl)
-                    # refresh du name map
-                    NAME_MAP = get_name_map()
-                    st.success(f"{isin} ajouté. " + (f"Résolu → {ticker}" if ticker else "⚠️ ticker à résoudre"))
+                    my_wl = pd.concat([my_wl, pd.DataFrame([add])], ignore_index=True)
+                    my_wl = my_wl.drop_duplicates(subset=["isin","ticker"]).reset_index(drop=True)
+                    save_my_watchlist(my_wl)
+                    st.success(f"Ajouté. " + (f"Résolu → {ticker}" if ticker else "⚠️ ticker à résoudre"))
                 else:
-                    st.warning("ISIN requis.")
+                    st.warning("Renseigne au moins un ISIN ou un ticker.")
 
         # --- Supprimer ---
         with colB:
-            st.markdown("**Supprimer par ISIN**")
-            del_isin = st.selectbox("Choisir un ISIN à supprimer", [""] + wl["isin"].tolist(), key="del_isin")
-            if st.button("Supprimer de la watchlist"):
-                if del_isin:
-                    wl = wl[wl["isin"] != del_isin].reset_index(drop=True)
-                    save_watchlist_to_session(wl)
-                    # refresh du name map
-                    NAME_MAP = get_name_map()
-                    st.success(f"{del_isin} supprimé.")
+            st.markdown("**Supprimer (dans ma watchlist)**")
+            del_choice = st.selectbox("Choisir une ligne à supprimer", [""] + (my_wl.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1).tolist()))
+            if st.button("Supprimer de ma watchlist"):
+                if del_choice:
+                    # retrouver l'ISIN/ticker à partir du libellé
+                    parts = del_choice.split(" (")
+                    left = parts[0] if parts else ""
+                    isin = del_choice.split("(")[-1].rstrip(")") if "(" in del_choice else ""
+                    ticker = left.split(" — ")[0] if " — " in left else left
+                    before = len(my_wl)
+                    my_wl = my_wl[~((my_wl["ticker"]==ticker) | (my_wl["isin"]==isin))].reset_index(drop=True)
+                    save_my_watchlist(my_wl)
+                    st.success(f"Supprimé ({before-len(my_wl)} ligne).")
 
-        # --- Résoudre ---
+        # --- Résoudre les lignes sans ticker dans ma watchlist ---
         with colC:
-            st.markdown("**🔍 Résoudre l’ISIN → ticker**")
-            unresolved = wl[wl["ticker"].isin(["", "NA", "NAN"]) | wl["ticker"].isna()]
+            st.markdown("**🔍 Résoudre (ISIN → ticker) dans ma watchlist**")
+            unresolved = my_wl[(my_wl["ticker"]=="") | (my_wl["ticker"].isna())]
             if len(unresolved) > 0:
-                pick = st.selectbox("ISIN à résoudre", unresolved["isin"].tolist(), key="res_isin")
-                name_hint = wl.loc[wl["isin"] == pick, "name"].iloc[0] if not wl[wl["isin"] == pick].empty else ""
-                if st.button("🔍 Résoudre cet ISIN"):
-                    wl, t = resolve_and_update_row(wl, pick, name_hint)
+                pick = st.selectbox("ISIN à résoudre", unresolved["isin"].tolist(), key="res_isin_mywl")
+                name_hint = my_wl.loc[my_wl["isin"] == pick, "name"].iloc[0] if not my_wl[my_wl["isin"] == pick].empty else ""
+                if st.button("🔍 Résoudre cet ISIN (ma watchlist)"):
+                    t = resolve_isin_to_ticker(pick, name_hint=name_hint)
                     if t:
+                        my_wl.loc[my_wl["isin"] == pick, "ticker"] = t
+                        save_my_watchlist(my_wl)
                         st.success(f"{pick} → {t}")
                     else:
                         st.warning("Aucun ticker trouvé automatiquement.")
 
-            if st.button("🔎 Résoudre tous les ISIN sans ticker"):
-                count_ok = 0
-                unresolved = wl[wl["ticker"].isin(["", "NA", "NAN"]) | wl["ticker"].isna()]
-                for _, r in unresolved.iterrows():
-                    wl, t = resolve_and_update_row(wl, r["isin"], r.get("name",""))
-                    if t:
-                        count_ok += 1
-                st.success(f"Résolution terminée : {count_ok} trouvé(s).")
-
-        # Export CSV mis à jour
+        # Export de TA watchlist perso
         st.download_button(
-            "⬇️ Télécharger watchlist.csv (sauvegarde)",
-            data=export_watchlist_csv_bytes(wl),
-            file_name="watchlist.csv",
+            "⬇️ Télécharger MA watchlist (CSV)",
+            data=export_csv_bytes(my_wl),
+            file_name="my_watchlist.csv",
             mime="text/csv"
         )
 
     st.markdown("---")
-    st.subheader("Résultats du scan (rapide)")
-    run = st.button("🚀 Lancer le scan maintenant (watchlist affichée)")
+    st.subheader("📈 Scanner ma watchlist (résultats du jour)")
+    run = st.button("🚀 Scanner maintenant (ma watchlist)")
     if run:
         rows = []
-        progress = st.progress(0)
-        tickers = wl.loc[wl["ticker"].astype(str).str.len() > 0, "ticker"].tolist()
+        prog = st.progress(0)
+        tickers = my_wl.loc[my_wl["ticker"].astype(str).str.len() > 0, "ticker"].tolist()
         n = len(tickers)
         for i, tkr in enumerate(tickers, start=1):
-            progress.progress(i / max(n, 1))
+            prog.progress(i / max(n, 1))
             res = score_one(tkr)
             if res is not None:
                 rows.append(res)
@@ -283,25 +315,21 @@ with tab_scan:
             df_out = (pd.DataFrame(rows)
                       .sort_values(by=["Score","Ticker"], ascending=[False, True])
                       .reset_index(drop=True))
-            # ordre avec Name juste après Ticker
             cols = ["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
             df_out = df_out[[c for c in cols if c in df_out.columns]]
             st.dataframe(df_out, use_container_width=True)
 
-            st.markdown("**Top 10 opportunités 🟢**")
-            st.dataframe(
-                df_out.head(10)[["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20"]],
-                use_container_width=True
-            )
+            st.markdown("**Top 10 opportunités 🟢 (ma watchlist)**")
+            st.dataframe(df_out.head(10)[["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20"]],
+                         use_container_width=True)
         else:
-            st.info("Aucun résultat (tickers manquants ou invalides).")
+            st.info("Aucun résultat (aucun ticker dans ta watchlist ou tickers invalides).")
 
 # --------- Onglet FICHE ---------
 with tab_single:
     st.title("Fiche valeur (analyse individuelle)")
     ticker_input = st.text_input("Ticker Yahoo Finance (ex: AAPL, OR.PA, MC.PA)", "AAPL")
 
-    # Affiche le nom s'il existe dans ta watchlist
     nm = get_name_for_ticker(ticker_input)
     if nm:
         st.caption(f"**{nm}**")
@@ -317,8 +345,7 @@ with tab_single:
                     df.columns = df.columns.get_level_values(0)
                 except Exception:
                     df = df.droplevel(1, axis=1)
-
-            needed = {"Open", "High", "Low", "Close", "Volume"}
+            needed = {"Open","High","Low","Close","Volume"}
             if df.empty or not needed.issubset(df.columns):
                 st.warning("Pas de données utilisables pour ce ticker.")
             else:
@@ -344,14 +371,12 @@ with tab_single:
         except Exception as e:
             st.error(f"Erreur de récupération des données : {e}")
 
-# --------- Onglet 🚀 SCANNER COMPLET ---------
+# --------- Onglet 🚀 SCANNER COMPLET (univers) ---------
 with tab_full:
     st.title("Scanner complet — Univers entier")
+    uni = load_universe()
+    base = uni.loc[uni["ticker"].astype(str).str.len() > 0].copy()
 
-    wl = load_watchlist()
-    base = wl.loc[wl["ticker"].astype(str).str.len() > 0].copy()
-
-    # Filtres
     colf1, colf2, colf3 = st.columns([1,2,1])
     markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
     sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
@@ -368,7 +393,6 @@ with tab_full:
     tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    # Exécution
     if st.button("🚀 Lancer le scan complet (parallèle)"):
         start = time.time()
         rows = []
@@ -394,19 +418,15 @@ with tab_full:
             out = (pd.DataFrame(rows)
                    .sort_values(by=["Score","Ticker"], ascending=[False, True])
                    .reset_index(drop=True))
-
-            # Signal visuel + colonnes ordonnées avec Name juste après Ticker
             def to_signal(a:str)->str:
                 return {"BUY":"🟢 BUY","WATCH":"🟢 WATCH","HOLD":"⚪ HOLD","REDUCE":"🟠 REDUCE","SELL":"🔴 SELL"}.get(a, a)
             out["Signal"] = out["Action"].map(to_signal)
-
             cols = ["Ticker","Name","Signal","Score","RSI","MACD_hist","%toHH52","VolZ20","Action"]
             out = out[[c for c in cols if c in out.columns]]
 
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.dataframe(out, use_container_width=True)
 
-            # Export CSV des résultats
             buffer = io.StringIO()
             out.to_csv(buffer, index=False)
             st.download_button(
