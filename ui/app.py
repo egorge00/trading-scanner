@@ -1,16 +1,23 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
+import os
 import datetime as dt
 import bcrypt
-import os
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+
+# ----- IMPORT MOTEUR KPI/SCORE -----
+from api.core.scoring import compute_kpis, compute_score
 
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Scanner", layout="wide")
 
-# ---------- AUTH (maison, simple & robuste) ----------
+# ---------- AUTH (simple & robuste) ----------
 USERNAME = "egorge"
-PASSWORD_HASH = os.getenv("PASSWORD_HASH", "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe")  # <= ton hash bcrypt déjà mis
+# Utilise la variable d'env si définie, sinon le hash déjà fourni :
+PASSWORD_HASH = os.getenv(
+    "PASSWORD_HASH",
+    "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe"  # <-- ton hash bcrypt
+)
 
 def login_form():
     st.title("Login")
@@ -52,34 +59,46 @@ st.title("Scanner d’opportunités – Daily")
 
 ticker = st.text_input("Ticker Yahoo Finance (ex: AAPL, OR.PA, MC.PA)", "AAPL")
 
-# ---- Données ----
+# ---- Données + KPI/Score ----
 if ticker:
     try:
-        # 1) Forcer des colonnes plates (pas de MultiIndex)
+        # Téléchargement (colonnes plates)
         df = yf.download(
             ticker, period="6mo", interval="1d",
             group_by="column", auto_adjust=False, progress=False
         )
-        if isinstance(df.columns, pd.MultiIndex):
-            # Si jamais MultiIndex malgré tout (rare)
-            df = df.xs("AAPL", level=1, axis=1) if "AAPL" in df.columns.get_level_values(1) else df.droplevel(1, axis=1)
 
-        if df.empty or "Close" not in df.columns:
+        # Aplanir si MultiIndex résiduel
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                df.columns = df.columns.get_level_values(0)
+            except Exception:
+                df = df.droplevel(1, axis=1)
+
+        if df.empty or not set(["Open", "High", "Low", "Close", "Volume"]).issubset(df.columns):
             st.warning("Pas de données utilisables pour ce ticker.")
         else:
-            # 2) RSI (EWMA, plus robuste)
-            delta = df["Close"].diff()
-            up = delta.clip(lower=0)
-            down = -delta.clip(upper=0)
-            roll_up = up.ewm(span=14, adjust=False).mean()
-            roll_down = down.ewm(span=14, adjust=False).mean()
-            rs = roll_up / roll_down
-            df["RSI"] = 100 - (100 / (1 + rs))
+            # Calcul KPIs + Score (moteur)
+            kpis = compute_kpis(df)
+            score = compute_score(kpis)
 
-            st.subheader(f"{ticker} – Clôtures & RSI")
-            st.line_chart(df[["Close", "RSI"]].dropna())
+            st.subheader(f"{ticker} — Score: {score.score} | Action: {score.action}")
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("RSI(14)", f"{kpis.rsi:.1f}")
+                st.metric("MACD hist", f"{kpis.macd_hist:.3f}")
+            with col2:
+                st.metric("Close > SMA50", "✅" if kpis.close_above_sma50 else "❌")
+                st.metric("SMA50 > SMA200", "✅" if kpis.sma50_above_sma200 else "❌")
+            with col3:
+                st.metric("% to 52w High", f"{kpis.pct_to_hh52*100:.2f}%")
+                st.metric("Vol Z20", f"{kpis.vol_z20:.2f}")
+
+            st.line_chart(df[["Close"]])
 
             st.write("Dernières valeurs :")
             st.dataframe(df.tail(5))
+
     except Exception as e:
         st.error(f"Erreur de récupération des données : {e}")
