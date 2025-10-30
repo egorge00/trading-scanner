@@ -120,6 +120,7 @@ def build_dax40() -> pd.DataFrame:
     return t[["isin","ticker","name","market"]]
 
 def main():
+    os.makedirs("data", exist_ok=True)  # <-- crée le dossier si absent
     sp = build_sp500()
     cac = build_cac40()
     es = build_eurostoxx50()
