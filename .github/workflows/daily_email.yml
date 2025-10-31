@@ -2,8 +2,7 @@ name: Send Daily Email
 
 on:
   schedule:
-    # 08:00 UTC = 09:00 Europe/Paris (en hiver)
-    - cron: "0 8 * * 1-5"
+    - cron: "0 8 * * 1-5"     # 08:00 UTC = 09:00 Europe/Paris (hiver)
   workflow_dispatch: {}
 
 permissions:
@@ -15,7 +14,7 @@ jobs:
     env:
       TZ: Europe/Paris
       EMAIL_FROM: "Scanner <er.gorge@gmail.com>"
-      EMAIL_TO: ${{ secrets.EMAIL_RECIPIENTS }}   # liste séparée par virgules
+      EMAIL_TO: ${{ secrets.EMAIL_RECIPIENTS }}   # OU mets l'email en dur si tu préfères
     steps:
       - name: Checkout
         uses: actions/checkout@v4
