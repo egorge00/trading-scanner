@@ -4,57 +4,132 @@
 """
 Daily runner for the Trading Scanner
 ------------------------------------
-Handles:
-- fetch: télécharge les données de marché et calcule les scores
-- email: envoie le rapport par mail
-- alerts: placeholder pour alertes futures
-- run: wrapper combinant tout
+Subcommands:
+  - fetch  : télécharge les données de marché et calcule les scores
+  - email  : envoie un rapport HTML simple par email (Gmail SMTP app password)
+  - alerts : placeholder
+  - run    : fetch + email
 
-Compatible avec GitHub Actions (pas d’exception fatale si un ticker échoue).
+Conçu pour GitHub Actions (réseau autorisé). Résilient aux tickers sans data.
 """
+
+from __future__ import annotations
 
 import os
 import sys
 import io
-import time
 import argparse
 import logging
 import smtplib
-import pandas as pd
-import yfinance as yf
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# Si besoin : importer ton module interne
-try:
-    from api.core.scoring import compute_kpis, compute_score
-except Exception:
-    def compute_kpis(df):  # fallback minimal pour standalone
-        class KPIs:
-            rsi = 50
-            macd_hist = 0
-            close_above_sma50 = False
-            sma50_above_sma200 = False
-            pct_to_hh52 = 0
-            vol_z20 = 0
-        return KPIs()
-    def compute_score(k):
-        class Score:
-            score = 0
-            action = "HOLD"
-        return Score()
+import pandas as pd
+import yfinance as yf
 
-# -------------------- Logging --------------------
+# ----- Logging -----
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("daily_run")
 
-# -------------------- Fetch helper --------------------
+# ----- Scoring (fallback si import échoue) -----
+try:
+    from api.core.scoring import compute_kpis, compute_score
+except Exception as e:
+    logger.warning("Could not import api.core.scoring (%s). Using fallback scoring.", e)
+
+    class _KPIs:
+        rsi = 50.0
+        macd_hist = 0.0
+        close_above_sma50 = False
+        sma50_above_sma200 = False
+        pct_to_hh52 = 0.0
+        vol_z20 = 0.0
+
+    def compute_kpis(_df):  # type: ignore
+        return _KPIs()
+
+    class _Score:
+        score = 0.0
+        action = "HOLD"
+
+    def compute_score(_k):  # type: ignore
+        return _Score()
+
+# =============================================================================
+# Helpers marché
+# =============================================================================
+
+def _flatten_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Aplati et normalise un DataFrame yfinance pour récupérer
+    colonnes: ['Open','High','Low','Close','Volume'] si possible.
+    Retourne None si inutilisable.
+    """
+    if df is None or df.empty:
+        return None
+
+    # MultiIndex → tenter d'aplatir
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            # cas le plus fréquent: niveau 0 = OHLCV
+            df.columns = df.columns.get_level_values(0)
+        except Exception:
+            try:
+                df = df.droplevel(1, axis=1)
+            except Exception:
+                return None
+
+    # Normaliser les noms (title-case)
+    def _norm(c: str) -> str:
+        c = str(c).strip()
+        # gérer cas "adj close", "Adj Close", "adjclose"
+        if c.lower().replace(" ", "") in ("adjclose", "adjustedclose", "adjusted_close"):
+            return "Adj Close"
+        # enlever suffixes style ".1"
+        c = c.replace(".", " ").strip()
+        # parfois yfinance livre "open" en minuscule
+        return c.title()
+
+    df = df.copy()
+    df.columns = [_norm(c) for c in df.columns]
+
+    cols = set(df.columns)
+
+    # Si 'Close' absent mais 'Adj Close' présent → utiliser Adj Close
+    if "Close" not in cols and "Adj Close" in cols:
+        df["Close"] = df["Adj Close"]
+
+    needed = {"Open", "High", "Low", "Close", "Volume"}
+    if not needed.issubset(set(df.columns)):
+        # tout de même, si Volume absent, on peut essayer de continuer en le synthétisant à NaN
+        missing = needed.difference(set(df.columns))
+        if missing == {"Volume"}:
+            df["Volume"] = pd.NA
+        else:
+            return None
+
+    # Nettoyage
+    try:
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    except KeyError:
+        # si on est ici, colonnes encore manquantes → inutilisable
+        return None
+
+    if df.empty:
+        return None
+    return df
+
+
 def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
-    """Télécharge un historique plat OHLCV, sinon None"""
+    """
+    Télécharge l'historique daily pour un ticker via yfinance
+    et renvoie un DataFrame *plat* avec colonnes OHLCV.
+    Retourne None si données inutilisables.
+    """
     try:
         df = yf.download(
             ticker,
@@ -64,37 +139,41 @@ def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
             auto_adjust=False,
             progress=False,
         )
-        if df is None or df.empty:
-            return None
-
-        # MultiIndex → aplatir
-        if isinstance(df.columns, pd.MultiIndex):
-            try:
-                df.columns = df.columns.get_level_values(0)
-            except Exception:
-                try:
-                    df = df.droplevel(1, axis=1)
-                except Exception:
-                    return None
-
-        needed = {"Open", "High", "Low", "Close", "Volume"}
-        if not needed.issubset(set(df.columns)):
-            return None
-
-        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
-        if df.empty:
-            return None
-        return df
-    except Exception:
+    except Exception as e:
+        logger.warning("yfinance download failed for %s: %s", ticker, e)
         return None
 
+    out = _flatten_ohlcv(df)
+    if out is None:
+        logger.info("No usable OHLCV for %s (period=%s). Skipping.", ticker, period)
+    return out
 
-# -------------------- Scoring --------------------
+
+# =============================================================================
+# Scoring
+# =============================================================================
+
 def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[dict], list[dict]]:
+    """
+    Parcourt les tickers de la watchlist, calcule KPIs + score.
+    Retourne (scores, errors):
+      - scores: liste de dicts avec Ticker, Name, Score, etc.
+      - errors: liste de dicts {ticker, reason}
+    """
     rows: list[dict] = []
     errors: list[dict] = []
 
     wl = watchlist.copy()
+    # Normalisation colonnes attendues
+    lower = {c.lower(): c for c in wl.columns}
+    for want in ("isin", "ticker", "name", "market"):
+        if want not in lower:
+            wl[want] = ""
+        else:
+            real = lower[want]
+            if real != want:
+                wl = wl.rename(columns={real: want})
+
     wl["ticker"] = wl["ticker"].astype(str).str.strip().str.upper()
     wl["name"] = wl.get("name", "").astype(str)
     wl = wl[wl["ticker"].str.len() > 0]
@@ -113,35 +192,28 @@ def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[d
             rows.append({
                 "Ticker": tkr,
                 "Name": name,
-                "Score": s.score,
-                "Action": s.action,
-                "RSI": round(k.rsi, 1),
-                "MACD_hist": round(k.macd_hist, 3),
-                "Close>SMA50": bool(k.close_above_sma50),
-                "SMA50>SMA200": bool(k.sma50_above_sma200),
-                "%toHH52": float(k.pct_to_hh52),
-                "VolZ20": float(k.vol_z20),
+                "Score": float(getattr(s, "score", 0.0)),
+                "Action": str(getattr(s, "action", "HOLD")),
+                "RSI": round(float(getattr(k, "rsi", 0.0)), 1),
+                "MACD_hist": round(float(getattr(k, "macd_hist", 0.0)), 3),
+                "Close>SMA50": bool(getattr(k, "close_above_sma50", False)),
+                "SMA50>SMA200": bool(getattr(k, "sma50_above_sma200", False)),
+                "%toHH52": float(getattr(k, "pct_to_hh52", 0.0)),
+                "VolZ20": float(getattr(k, "vol_z20", 0.0)),
             })
         except Exception as e:
             errors.append({"ticker": tkr, "reason": f"exception:{type(e).__name__}"})
-            continue
 
     return rows, errors
 
 
-# -------------------- Main tasks --------------------
+# =============================================================================
+# Tasks
+# =============================================================================
+
 def run_fetch(watchlist_path: str, positions_path: str | None, output_dir: str, period: str = "6mo"):
     logger.info("Loading watchlist from %s", watchlist_path)
     wl = pd.read_csv(watchlist_path)
-
-    wl_cols = {c.lower(): c for c in wl.columns}
-    rename_map = {}
-    for want in ("isin", "ticker", "name", "market"):
-        if want not in wl_cols:
-            wl[want] = ""
-        else:
-            rename_map[wl_cols[want]] = want
-    wl = wl.rename(columns=rename_map)
 
     logger.info("Scoring universe (period=%s)...", period)
     scores, errors = score_universe(wl, period=period)
@@ -174,13 +246,20 @@ def run_email(
         logger.warning("scores.csv not found, running fetch first.")
         run_fetch(watchlist_path, None, output_dir, period=period)
 
-    df = pd.read_csv(scores_file)
+    try:
+        df = pd.read_csv(scores_file)
+    except Exception as e:
+        logger.error("Cannot read %s: %s", scores_file, e)
+        df = pd.DataFrame()
+
     if df.empty:
         body = "<p>Aucune donnée disponible aujourd’hui.</p>"
     else:
         df_sorted = df.sort_values(by="Score", ascending=False).head(10)
         body = "<h3>Top 10 opportunités 🟢</h3>"
-        body += df_sorted.to_html(index=False, justify="center", border=0)
+        # petit formatage
+        show_cols = [c for c in ["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20"] if c in df_sorted.columns]
+        body += df_sorted[show_cols].to_html(index=False, justify="center", border=0)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Daily Market Scanner"
@@ -192,15 +271,18 @@ def run_email(
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
-            server.sendmail(sender, recipients.split(","), msg.as_string())
+            server.sendmail(sender, [x.strip() for x in recipients.split(",") if x.strip()], msg.as_string())
         logger.info("Email sent successfully to %s", recipients)
     except Exception as e:
         logger.error("SMTP send failed: %s", e)
         raise
 
 
-# -------------------- CLI --------------------
-def main():
+# =============================================================================
+# CLI
+# =============================================================================
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Daily runner for trading scanner")
     parser.add_argument("--watchlist", required=False, default="data/watchlist.csv")
     parser.add_argument("--positions", required=False, default=None)
@@ -225,8 +307,9 @@ def main():
     if args.command == "fetch":
         logger.info("Executing command: fetch")
         run_fetch(args.watchlist, args.positions, args.output, period=args.period)
+        return 0
 
-    elif args.command == "email":
+    if args.command == "email":
         logger.info("Executing command: email")
         run_email(
             args.watchlist,
@@ -237,8 +320,9 @@ def main():
             args.smtp_user,
             args.smtp_password,
         )
+        return 0
 
-    elif args.command == "run":
+    if args.command == "run":
         logger.info("Executing command: run (fetch + email)")
         run_fetch(args.watchlist, args.positions, args.output, period=args.period)
         run_email(
@@ -250,9 +334,10 @@ def main():
             os.getenv("SMTP_LOGIN", ""),
             os.getenv("SMTP_PASSWORD", ""),
         )
+        return 0
 
-    else:
-        parser.print_help()
+    parser.print_help()
+    return 2
 
 
 if __name__ == "__main__":
