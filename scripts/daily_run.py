@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import sys
-import io
 import argparse
 import logging
 import smtplib
@@ -72,10 +71,9 @@ def _flatten_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
-    # MultiIndex → tenter d'aplatir
+    # MultiIndex → aplatir
     if isinstance(df.columns, pd.MultiIndex):
         try:
-            # cas le plus fréquent: niveau 0 = OHLCV
             df.columns = df.columns.get_level_values(0)
         except Exception:
             try:
@@ -83,29 +81,25 @@ def _flatten_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
             except Exception:
                 return None
 
-    # Normaliser les noms (title-case)
+    # Normaliser les noms
     def _norm(c: str) -> str:
         c = str(c).strip()
-        # gérer cas "adj close", "Adj Close", "adjclose"
         if c.lower().replace(" ", "") in ("adjclose", "adjustedclose", "adjusted_close"):
             return "Adj Close"
-        # enlever suffixes style ".1"
         c = c.replace(".", " ").strip()
-        # parfois yfinance livre "open" en minuscule
         return c.title()
 
     df = df.copy()
     df.columns = [_norm(c) for c in df.columns]
 
-    cols = set(df.columns)
-
     # Si 'Close' absent mais 'Adj Close' présent → utiliser Adj Close
+    cols = set(df.columns)
     if "Close" not in cols and "Adj Close" in cols:
         df["Close"] = df["Adj Close"]
 
     needed = {"Open", "High", "Low", "Close", "Volume"}
     if not needed.issubset(set(df.columns)):
-        # tout de même, si Volume absent, on peut essayer de continuer en le synthétisant à NaN
+        # tolère Volume manquant
         missing = needed.difference(set(df.columns))
         if missing == {"Volume"}:
             df["Volume"] = pd.NA
@@ -116,7 +110,6 @@ def _flatten_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
     try:
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
     except KeyError:
-        # si on est ici, colonnes encore manquantes → inutilisable
         return None
 
     if df.empty:
@@ -125,11 +118,7 @@ def _flatten_ohlcv(df: pd.DataFrame) -> pd.DataFrame | None:
 
 
 def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
-    """
-    Télécharge l'historique daily pour un ticker via yfinance
-    et renvoie un DataFrame *plat* avec colonnes OHLCV.
-    Retourne None si données inutilisables.
-    """
+    """Télécharge un historique daily et renvoie un DF plat OHLCV, sinon None."""
     try:
         df = yf.download(
             ticker,
@@ -148,7 +137,6 @@ def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
         logger.info("No usable OHLCV for %s (period=%s). Skipping.", ticker, period)
     return out
 
-
 # =============================================================================
 # Scoring
 # =============================================================================
@@ -156,15 +144,15 @@ def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
 def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[dict], list[dict]]:
     """
     Parcourt les tickers de la watchlist, calcule KPIs + score.
-    Retourne (scores, errors):
-      - scores: liste de dicts avec Ticker, Name, Score, etc.
+    Retourne (scores, errors) :
+      - scores: liste de dicts (Ticker, Name, Score, Action, KPIs…)
       - errors: liste de dicts {ticker, reason}
     """
     rows: list[dict] = []
     errors: list[dict] = []
 
     wl = watchlist.copy()
-    # Normalisation colonnes attendues
+    # Normaliser colonnes attendues
     lower = {c.lower(): c for c in wl.columns}
     for want in ("isin", "ticker", "name", "market"):
         if want not in lower:
@@ -206,7 +194,6 @@ def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[d
 
     return rows, errors
 
-
 # =============================================================================
 # Tasks
 # =============================================================================
@@ -229,7 +216,6 @@ def run_fetch(watchlist_path: str, positions_path: str | None, output_dir: str, 
         logger.warning("Some tickers failed. See %s", out_err)
     else:
         logger.info("All tickers processed successfully.")
-
 
 def run_email(
     watchlist_path: str,
@@ -256,10 +242,8 @@ def run_email(
         body = "<p>Aucune donnée disponible aujourd’hui.</p>"
     else:
         df_sorted = df.sort_values(by="Score", ascending=False).head(10)
-        body = "<h3>Top 10 opportunités 🟢</h3>"
-        # petit formatage
         show_cols = [c for c in ["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20"] if c in df_sorted.columns]
-        body += df_sorted[show_cols].to_html(index=False, justify="center", border=0)
+        body = "<h3>Top 10 opportunités 🟢</h3>" + df_sorted[show_cols].to_html(index=False, justify="center", border=0)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Daily Market Scanner"
@@ -276,7 +260,6 @@ def run_email(
     except Exception as e:
         logger.error("SMTP send failed: %s", e)
         raise
-
 
 # =============================================================================
 # CLI
@@ -338,7 +321,6 @@ def main() -> int:
 
     parser.print_help()
     return 2
-
 
 if __name__ == "__main__":
     sys.exit(main())
