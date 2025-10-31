@@ -1,0 +1,68 @@
+name: Daily market pipeline
+
+on:
+  schedule:
+    - cron: '30 6 * * *'
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Job to run (fetch, email, both)'
+        required: false
+        default: 'both'
+
+jobs:
+  fetch:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.target != 'email') || github.event.schedule == '30 6 * * *' }}
+    runs-on: ubuntu-latest
+    env:
+      SMTP_LOGIN: ${{ secrets.SMTP_LOGIN }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compute cache key
+        id: cache-key
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Ensure output directory
+        run: mkdir -p data/generated
+      - name: Restore generated cache
+        uses: actions/cache@v3
+        with:
+          path: data/generated
+          key: daily-generated-${{ steps.cache-key.outputs.date }}
+      - name: Fetch and score universe
+        run: python scripts/daily_run.py fetch --output data/generated
+
+  email:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.target != 'fetch') || github.event.schedule == '0 8 * * *' }}
+    runs-on: ubuntu-latest
+    env:
+      SMTP_LOGIN: ${{ secrets.SMTP_LOGIN }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+      EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compute cache key
+        id: cache-key
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Ensure output directory
+        run: mkdir -p data/generated
+      - name: Restore generated cache
+        uses: actions/cache@v3
+        with:
+          path: data/generated
+          key: daily-generated-${{ steps.cache-key.outputs.date }}
+      - name: Send email report
+        run: python scripts/daily_run.py email --output data/generated --subject "Daily Market Scanner" --sender "${{ env.EMAIL_SENDER }}"
