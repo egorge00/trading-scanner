@@ -1,410 +1,259 @@
-"""Daily pipeline orchestrator for the trading scanner."""
-from __future__ import annotations
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import argparse
-import json
-import logging
+"""
+Daily runner for the Trading Scanner
+------------------------------------
+Handles:
+- fetch: télécharge les données de marché et calcule les scores
+- email: envoie le rapport par mail
+- alerts: placeholder pour alertes futures
+- run: wrapper combinant tout
+
+Compatible avec GitHub Actions (pas d’exception fatale si un ticker échoue).
+"""
+
 import os
 import sys
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
-
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
+import io
+import time
+import argparse
+import logging
+import smtplib
 import pandas as pd
 import yfinance as yf
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-from api.core.scoring import KPIResult, ScoreResult, compute_kpis, compute_score
-from api.notifications import DailyEmailContext, send_daily_email
+# Si besoin : importer ton module interne
+try:
+    from api.core.scoring import compute_kpis, compute_score
+except Exception:
+    def compute_kpis(df):  # fallback minimal pour standalone
+        class KPIs:
+            rsi = 50
+            macd_hist = 0
+            close_above_sma50 = False
+            sma50_above_sma200 = False
+            pct_to_hh52 = 0
+            vol_z20 = 0
+        return KPIs()
+    def compute_score(k):
+        class Score:
+            score = 0
+            action = "HOLD"
+        return Score()
 
-LOGGER = logging.getLogger("daily_run")
+# -------------------- Logging --------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
 
-DEFAULT_OUTPUT_DIR = Path("data/generated")
-DEFAULT_ALERT_STATE = DEFAULT_OUTPUT_DIR / "alerts_state.json"
-
-
-class PipelineError(RuntimeError):
-    """Raised when the pipeline cannot complete."""
-
-
-def _ensure_output_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
-def load_watchlist(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df = df.rename(columns={c: c.strip() for c in df.columns})
-    df["ticker"] = df["ticker"].astype(str).str.strip()
-    df = df[df["ticker"] != ""]
-    return df
-
-
-def load_positions(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df = df.rename(columns={c: c.strip() for c in df.columns})
-    if "status" in df.columns:
-        df["status"] = df["status"].astype(str).str.lower().str.strip()
-    if "ticker" in df.columns:
-        df["ticker"] = df["ticker"].astype(str).str.strip()
-    df = df[df.get("ticker", "") != ""]
-    return df
-
-
-def fetch_history(ticker: str, period: str = "2y") -> pd.DataFrame | None:
+# -------------------- Fetch helper --------------------
+def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
+    """Télécharge un historique plat OHLCV, sinon None"""
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False, threads=False)
-    except Exception as exc:  # pragma: no cover - network errors
-        LOGGER.warning("Failed to download %s: %s", ticker, exc)
-        return None
-    if df.empty:
-        LOGGER.warning("No data for %s", ticker)
-        return None
-    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-    if len(df) < 200:
-        LOGGER.debug("Not enough history for %s (%d rows)", ticker, len(df))
-        return None
-    return df
-
-
-def score_universe(watchlist: pd.DataFrame, period: str = "2y") -> tuple[pd.DataFrame, list[str]]:
-    rows = []
-    errors: list[str] = []
-    generated_at = datetime.now(timezone.utc).isoformat()
-    for entry in watchlist.itertuples():
-        ticker = entry.ticker
-        history = fetch_history(ticker, period=period)
-        if history is None:
-            errors.append(ticker)
-            continue
-        try:
-            kpi: KPIResult = compute_kpis(history)
-            score: ScoreResult = compute_score(kpi)
-        except Exception as exc:  # pragma: no cover - scoring errors
-            LOGGER.exception("Scoring failed for %s: %s", ticker, exc)
-            errors.append(ticker)
-            continue
-        rows.append(
-            {
-                "ticker": ticker,
-                "name": getattr(entry, "name", ""),
-                "market": getattr(entry, "market", ""),
-                "score": score.score,
-                "action": score.action,
-                "rsi": kpi.rsi,
-                "macd_hist": kpi.macd_hist,
-                "vol_z20": kpi.vol_z20,
-                "pct_to_hh52": kpi.pct_to_hh52,
-                "pct_from_ll52": kpi.pct_from_ll52,
-                "generated_at": generated_at,
-            }
+        df = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            group_by="column",
+            auto_adjust=False,
+            progress=False,
         )
-    scores_df = pd.DataFrame(rows)
-    if not scores_df.empty:
-        scores_df = scores_df.sort_values("score", ascending=False).reset_index(drop=True)
-        scores_df["rank"] = scores_df.index + 1
-    return scores_df, errors
+        if df is None or df.empty:
+            return None
 
-
-def build_top(scores: pd.DataFrame, limit: int = 10) -> pd.DataFrame:
-    columns = ["rank", "ticker", "name", "score", "action"]
-    if scores.empty:
-        return pd.DataFrame(columns=columns)
-    subset = scores.nsmallest(limit, columns=["rank"]).sort_values("rank")
-    for col in columns:
-        if col not in subset.columns:
-            subset[col] = ""
-    return subset[columns]
-
-
-def merge_positions(scores: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
-    if positions.empty:
-        return positions.copy()
-    if scores.empty:
-        merged = positions.copy()
-        merged["score"] = 0.0
-        merged["action"] = "UNKNOWN"
-        return merged
-    merged = positions.merge(scores[["ticker", "score", "action"]], on="ticker", how="left")
-    merged["score"] = merged["score"].fillna(0.0)
-    merged["action"] = merged["action"].fillna("UNKNOWN")
-    return merged
-
-
-def _load_alert_state(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError:
-        LOGGER.warning("Alert state file is corrupted, ignoring.")
-        return {}
-
-
-def _save_alert_state(path: Path, state: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2))
-
-
-def check_alerts(
-    positions: pd.DataFrame,
-    cooldown_hours: int = 6,
-    state_path: Path = DEFAULT_ALERT_STATE,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    now = now or datetime.now(timezone.utc)
-    state = _load_alert_state(state_path)
-    triggered: list[dict[str, Any]] = []
-    keep_keys = set()
-    for entry in positions.itertuples():
-        if getattr(entry, "status", "open") != "open":
-            continue
-        score_value = getattr(entry, "score", 0)
-        if score_value is None:
-            continue
-        ticker = entry.ticker
-        keep_keys.add(ticker)
-        if float(score_value) > -2.0:
-            continue
-        last_ts = state.get(ticker)
-        if last_ts:
+        # MultiIndex → aplatir
+        if isinstance(df.columns, pd.MultiIndex):
             try:
-                last_dt = datetime.fromisoformat(last_ts)
-            except ValueError:
-                last_dt = None
-            if last_dt and now - last_dt < timedelta(hours=cooldown_hours):
+                df.columns = df.columns.get_level_values(0)
+            except Exception:
+                try:
+                    df = df.droplevel(1, axis=1)
+                except Exception:
+                    return None
+
+        needed = {"Open", "High", "Low", "Close", "Volume"}
+        if not needed.issubset(set(df.columns)):
+            return None
+
+        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+# -------------------- Scoring --------------------
+def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    errors: list[dict] = []
+
+    wl = watchlist.copy()
+    wl["ticker"] = wl["ticker"].astype(str).str.strip().str.upper()
+    wl["name"] = wl.get("name", "").astype(str)
+    wl = wl[wl["ticker"].str.len() > 0]
+
+    for _, r in wl.iterrows():
+        tkr = r["ticker"]
+        name = r.get("name", "")
+        try:
+            history = fetch_history(tkr, period=period)
+            if history is None:
+                errors.append({"ticker": tkr, "reason": "no_usable_history"})
                 continue
-        payload = {
-            "ticker": ticker,
-            "score": float(score_value),
-            "action": getattr(entry, "action", "SELL"),
-            "opened_at": getattr(entry, "opened_at", ""),
-            "note": getattr(entry, "note", ""),
-        }
-        triggered.append(payload)
-        state[ticker] = now.isoformat()
-    # Clean-up: remove non-open positions from state
-    for key in list(state.keys()):
-        if key not in keep_keys:
-            state.pop(key)
-    _save_alert_state(state_path, state)
-    return triggered
+
+            k = compute_kpis(history)
+            s = compute_score(k)
+            rows.append({
+                "Ticker": tkr,
+                "Name": name,
+                "Score": s.score,
+                "Action": s.action,
+                "RSI": round(k.rsi, 1),
+                "MACD_hist": round(k.macd_hist, 3),
+                "Close>SMA50": bool(k.close_above_sma50),
+                "SMA50>SMA200": bool(k.sma50_above_sma200),
+                "%toHH52": float(k.pct_to_hh52),
+                "VolZ20": float(k.vol_z20),
+            })
+        except Exception as e:
+            errors.append({"ticker": tkr, "reason": f"exception:{type(e).__name__}"})
+            continue
+
+    return rows, errors
 
 
-def dataframe_to_records(df: pd.DataFrame, columns: list[str]) -> list[dict[str, Any]]:
-    if df.empty:
-        return []
-    return df[columns].to_dict(orient="records")
+# -------------------- Main tasks --------------------
+def run_fetch(watchlist_path: str, positions_path: str | None, output_dir: str, period: str = "6mo"):
+    logger.info("Loading watchlist from %s", watchlist_path)
+    wl = pd.read_csv(watchlist_path)
 
+    wl_cols = {c.lower(): c for c in wl.columns}
+    rename_map = {}
+    for want in ("isin", "ticker", "name", "market"):
+        if want not in wl_cols:
+            wl[want] = ""
+        else:
+            rename_map[wl_cols[want]] = want
+    wl = wl.rename(columns=rename_map)
 
-def persist_results(
-    scores: pd.DataFrame,
-    top: pd.DataFrame,
-    positions: pd.DataFrame,
-    errors: list[str],
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
-) -> None:
-    _ensure_output_dir(output_dir)
-    scores_path = output_dir / "scores.csv"
-    top_path = output_dir / "top10.csv"
-    pos_path = output_dir / "positions.csv"
-    meta_path = output_dir / "meta.json"
-    scores.to_csv(scores_path, index=False)
-    top.to_csv(top_path, index=False)
-    positions.to_csv(pos_path, index=False)
-    metadata = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "errors": errors,
-        "scores_path": str(scores_path),
-        "positions_path": str(pos_path),
-        "top_path": str(top_path),
-    }
-    meta_path.write_text(json.dumps(metadata, indent=2))
+    logger.info("Scoring universe (period=%s)...", period)
+    scores, errors = score_universe(wl, period=period)
+    logger.info("Done. success=%d, errors=%d", len(scores), len(errors))
 
+    os.makedirs(output_dir, exist_ok=True)
+    out_scores = os.path.join(output_dir, "scores.csv")
+    pd.DataFrame(scores).to_csv(out_scores, index=False)
 
-def run_fetch(
-    watchlist_path: Path,
-    positions_path: Path,
-    output_dir: Path,
-    period: str = "2y",
-) -> dict[str, Any]:
-    LOGGER.info("Loading watchlist from %s", watchlist_path)
-    watchlist = load_watchlist(watchlist_path)
-    scores, errors = score_universe(watchlist, period=period)
-    LOGGER.info("Computed scores for %d tickers (errors=%d)", len(scores), len(errors))
-    LOGGER.info("Loading positions from %s", positions_path)
-    positions = load_positions(positions_path)
-    positions_with_scores = merge_positions(scores, positions)
-    top = build_top(scores)
-    persist_results(scores, top, positions_with_scores, errors, output_dir=output_dir)
-    return {
-        "scores": scores,
-        "positions": positions_with_scores,
-        "top": top,
-        "errors": errors,
-    }
-
-
-def load_latest(output_dir: Path) -> dict[str, pd.DataFrame]:
-    scores_path = output_dir / "scores.csv"
-    top_path = output_dir / "top10.csv"
-    pos_path = output_dir / "positions.csv"
-    if not scores_path.exists():
-        raise PipelineError(f"Scores file not found in {output_dir}")
-    return {
-        "scores": pd.read_csv(scores_path),
-        "top": pd.read_csv(top_path) if top_path.exists() else pd.DataFrame(),
-        "positions": pd.read_csv(pos_path) if pos_path.exists() else pd.DataFrame(),
-    }
-
-
-def _parse_recipients(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    if errors:
+        out_err = os.path.join(output_dir, "errors.csv")
+        pd.DataFrame(errors).to_csv(out_err, index=False)
+        logger.warning("Some tickers failed. See %s", out_err)
+    else:
+        logger.info("All tickers processed successfully.")
 
 
 def run_email(
-    output_dir: Path,
-    subject: str,
+    watchlist_path: str,
+    output_dir: str,
+    period: str,
     sender: str,
-    recipients: list[str],
+    recipients: str,
     smtp_user: str,
     smtp_password: str,
-) -> None:
-    datasets = load_latest(output_dir)
-    scores = datasets["scores"]
-    top = datasets["top"]
-    positions = datasets["positions"]
-    alerts: list[dict[str, Any]] = []
-    for row in dataframe_to_records(positions, ["ticker", "score", "action", "opened_at", "note"]):
-        try:
-            score_val = float(row.get("score", 0))
-        except (TypeError, ValueError):
-            continue
-        if score_val <= -2.0:
-            row["score"] = score_val
-            alerts.append(row)
-    events: list[dict[str, Any]] = []
-    context = DailyEmailContext(
-        generated_at=datetime.now(timezone.utc),
-        top_opportunities=dataframe_to_records(top, ["rank", "ticker", "name", "score", "action"]),
-        positions=dataframe_to_records(positions, ["ticker", "opened_at", "score", "action", "note"]),
-        alerts=alerts,
-        events=events,
-    )
-    send_daily_email(subject, sender, recipients, smtp_user, smtp_password, context)
+):
+    """Compose et envoie un rapport simple par email."""
+    scores_file = os.path.join(output_dir, "scores.csv")
+    if not os.path.exists(scores_file):
+        logger.warning("scores.csv not found, running fetch first.")
+        run_fetch(watchlist_path, None, output_dir, period=period)
+
+    df = pd.read_csv(scores_file)
+    if df.empty:
+        body = "<p>Aucune donnée disponible aujourd’hui.</p>"
+    else:
+        df_sorted = df.sort_values(by="Score", ascending=False).head(10)
+        body = "<h3>Top 10 opportunités 🟢</h3>"
+        body += df_sorted.to_html(index=False, justify="center", border=0)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Daily Market Scanner"
+    msg["From"] = sender
+    msg["To"] = recipients
+    msg.attach(MIMEText(body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(sender, recipients.split(","), msg.as_string())
+        logger.info("Email sent successfully to %s", recipients)
+    except Exception as e:
+        logger.error("SMTP send failed: %s", e)
+        raise
 
 
-def run_alerts(
-    output_dir: Path,
-    cooldown_hours: int,
-    sender: str,
-    recipients: list[str],
-    smtp_user: str,
-    smtp_password: str,
-    subject: str,
-) -> list[dict[str, Any]]:
-    datasets = load_latest(output_dir)
-    positions = datasets["positions"]
-    triggered = check_alerts(positions, cooldown_hours=cooldown_hours)
-    if triggered and recipients:
-        context = DailyEmailContext(
-            generated_at=datetime.now(timezone.utc),
-            top_opportunities=[],
-            positions=dataframe_to_records(positions, ["ticker", "opened_at", "score", "action", "note"]),
-            alerts=triggered,
-            events=[],
+# -------------------- CLI --------------------
+def main():
+    parser = argparse.ArgumentParser(description="Daily runner for trading scanner")
+    parser.add_argument("--watchlist", required=False, default="data/watchlist.csv")
+    parser.add_argument("--positions", required=False, default=None)
+    parser.add_argument("--output", required=False, default="out")
+    parser.add_argument("--period", required=False, default="6mo")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("fetch", help="Download market data & compute scores")
+    sub.add_parser("alerts", help="Placeholder for alert logic")
+
+    email_p = sub.add_parser("email", help="Send daily report by email")
+    email_p.add_argument("--sender", required=True)
+    email_p.add_argument("--recipients", required=True)
+    email_p.add_argument("--smtp-user", required=True)
+    email_p.add_argument("--smtp-password", required=True)
+
+    sub.add_parser("run", help="Run fetch then email")
+
+    args = parser.parse_args()
+    os.makedirs(args.output, exist_ok=True)
+
+    if args.command == "fetch":
+        logger.info("Executing command: fetch")
+        run_fetch(args.watchlist, args.positions, args.output, period=args.period)
+
+    elif args.command == "email":
+        logger.info("Executing command: email")
+        run_email(
+            args.watchlist,
+            args.output,
+            args.period,
+            args.sender,
+            args.recipients,
+            args.smtp_user,
+            args.smtp_password,
         )
-        send_daily_email(subject, sender, recipients, smtp_user, smtp_password, context)
-    return triggered
 
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Daily trading scanner pipeline")
-    parser.add_argument("--watchlist", type=Path, default=Path("data/watchlist.csv"))
-    parser.add_argument("--positions", type=Path, default=Path("data/positions.csv"))
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--period", default="2y")
-
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("fetch", help="Fetch market data and compute scores")
-
-    email_parser = sub.add_parser("email", help="Send the daily email report")
-    email_parser.add_argument("--subject", default="Daily Market Scanner")
-    email_parser.add_argument("--sender", default="scanner@example.com")
-    email_parser.add_argument("--recipients")
-    email_parser.add_argument("--smtp-user")
-    email_parser.add_argument("--smtp-password")
-
-    alert_parser = sub.add_parser("alerts", help="Trigger alert email for red positions")
-    alert_parser.add_argument("--subject", default="Alertes positions - Trading Scanner")
-    alert_parser.add_argument("--cooldown", type=int, default=6)
-    alert_parser.add_argument("--sender", default="scanner@example.com")
-    alert_parser.add_argument("--recipients")
-    alert_parser.add_argument("--smtp-user")
-    alert_parser.add_argument("--smtp-password")
-
-    sub.add_parser("run", help="Fetch data then send email")
-
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    watchlist_path: Path = args.watchlist
-    positions_path: Path = args.positions
-    output_dir: Path = args.output
-    period: str = args.period
-
-    command = args.command or "run"
-    LOGGER.info("Executing command: %s", command)
-
-    if command in {"fetch", "run"}:
-        run_fetch(watchlist_path, positions_path, output_dir, period=period)
-        if command == "fetch":
-            return 0
-
-    if command in {"email", "run"}:
-        subject = getattr(args, "subject", "Daily Market Scanner")
-        sender = getattr(args, "sender", "scanner@example.com")
-        recipients = _parse_recipients(
-            getattr(args, "recipients", None) or os.getenv("EMAIL_RECIPIENTS")
+    elif args.command == "run":
+        logger.info("Executing command: run (fetch + email)")
+        run_fetch(args.watchlist, args.positions, args.output, period=args.period)
+        run_email(
+            args.watchlist,
+            args.output,
+            args.period,
+            os.getenv("EMAIL_FROM", "scanner@example.com"),
+            os.getenv("EMAIL_RECIPIENTS", ""),
+            os.getenv("SMTP_LOGIN", ""),
+            os.getenv("SMTP_PASSWORD", ""),
         )
-        smtp_user = getattr(args, "smtp_user", None) or os.getenv("SMTP_LOGIN") or sender
-        smtp_password = getattr(args, "smtp_password", None) or os.getenv("SMTP_PASSWORD")
-        if not smtp_password:
-            raise PipelineError("SMTP password is required to send emails")
-        if not recipients:
-            LOGGER.warning("No recipients configured, skipping email sending")
-        else:
-            run_email(output_dir, subject, sender, recipients, smtp_user, smtp_password)
-        if command == "email":
-            return 0
 
-    if command == "alerts":
-        subject = getattr(args, "subject", "Alertes positions - Trading Scanner")
-        sender = getattr(args, "sender", "scanner@example.com")
-        cooldown = getattr(args, "cooldown", 6)
-        recipients = _parse_recipients(
-            getattr(args, "recipients", None) or os.getenv("EMAIL_RECIPIENTS")
-        )
-        smtp_user = getattr(args, "smtp_user", None) or os.getenv("SMTP_LOGIN") or sender
-        smtp_password = getattr(args, "smtp_password", None) or os.getenv("SMTP_PASSWORD")
-        if not smtp_password:
-            raise PipelineError("SMTP password is required for alerts")
-        triggered = run_alerts(output_dir, cooldown, sender, recipients, smtp_user, smtp_password, subject)
-        LOGGER.info("Triggered alerts: %d", len(triggered))
-        return 0
-
-    return 0
+    else:
+        parser.print_help()
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry point
+if __name__ == "__main__":
     sys.exit(main())
