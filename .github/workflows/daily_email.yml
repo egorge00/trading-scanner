@@ -1,0 +1,61 @@
+name: Send Daily Email
+
+on:
+  schedule:
+    # 08:00 UTC = 09:00 Europe/Paris (hiver). Ajuste si besoin.
+    - cron: "0 8 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Paris
+      EMAIL_FROM: "Scanner <er.gorge@gmail.com>"
+      EMAIL_TO: ${{ secrets.EMAIL_RECIPIENTS }}   # liste séparée par des virgules
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ui/requirements.txt || true
+          pip install pandas yfinance requests
+
+      # 1) FETCH marché (réseau autorisé ici)
+      - name: Fetch market data
+        run: |
+          mkdir -p out
+          # ⇩ remplace/ajuste si ton script a d’autres flags
+          python scripts/daily_run.py fetch --universe data/watchlist.csv --out out/quotes.parquet
+
+      # 2) RENDER rapport HTML (pas d’envoi ici)
+      - name: Render HTML report
+        run: |
+          # ⇩ si daily_run.py supporte "render"
+          python scripts/daily_run.py render --quotes out/quotes.parquet --out out/report.html
+          # Si tu n'as PAS de sous-commande "render", dis-le moi et je te fournis un scripts/render_report.py prêt à l’emploi.
+
+      # 3) SEND via Gmail SMTP (app password)
+      - name: Send email (Gmail SMTP)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server: smtp.gmail.com
+          port: 587
+          secure: true
+          username: ${{ secrets.SMTP_LOGIN }}        # ex: er.gorge@gmail.com
+          password: ${{ secrets.SMTP_PASSWORD }}     # mot de passe d’application (16 caractères)
+          subject: "Daily Market Scanner"
+          to: ${{ env.EMAIL_TO }}
+          from: ${{ env.EMAIL_FROM }}
+          html_body: file://out/report.html
+          # attachments: out/quotes.parquet
