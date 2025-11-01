@@ -449,14 +449,14 @@ def compute_score(df: pd.DataFrame):
 
 
 def _ensure_ohlcv_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplati yfinance, garde OHLCV numériques, index DateTime trié et tz-naive."""
+    """Aplati yfinance, reconstruit un OHLCV propre (Series float 1D), index datetime tz-naive."""
 
     if df is None or df.empty:
         return pd.DataFrame()
 
     x = df.copy()
 
-    # Aplatir MultiIndex éventuel
+    # 1) Aplatir MultiIndex éventuel
     if isinstance(x.columns, pd.MultiIndex):
         lvl0 = x.columns.get_level_values(0)
         keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
@@ -467,25 +467,83 @@ def _ensure_ohlcv_df(df: pd.DataFrame) -> pd.DataFrame:
         else:
             x = x.droplevel(-1, axis=1)
 
-    # Garde OHLCV si présents
+    # 2) Restreindre aux OHLCV si présents
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
+    if not cols:
+        return pd.DataFrame()
     x = x[cols].copy()
 
-    # Index -> DateTimeIndex trié, tz-naive
+    # 3) Index -> DateTimeIndex trié, tz-naive
     if not isinstance(x.index, pd.DatetimeIndex):
         x.index = pd.to_datetime(x.index, errors="coerce")
     x = x[~x.index.isna()].sort_index()
     try:
-        if x.index.tz is not None:
+        if getattr(x.index, "tz", None) is not None:
             x.index = x.index.tz_localize(None)
     except Exception:
         pass
 
-    # Cast numérique
-    for c in x.columns:
-        x[c] = pd.to_numeric(x[c], errors="coerce").astype(float)
+    # 4) Helper : forcer TOUT en Series float 1D (gère DataFrame, ndarray 2D, listes, scalaires)
+    import numpy as _np
 
-    return x
+    def _force_series_any(obj, name: str, idx) -> pd.Series:
+        # DataFrame -> choisir la colonne la plus complète
+        if isinstance(obj, pd.DataFrame):
+            if obj.shape[1] == 0:
+                return pd.Series(index=idx, dtype=float, name=name)
+            best_s, best_cnt = None, -1
+            for j in range(obj.shape[1]):
+                s = obj.iloc[:, j]
+                if not isinstance(s, pd.Series):
+                    s = pd.Series(s, index=obj.index, name=name)
+                s = pd.to_numeric(s, errors="coerce")
+                cnt = int(s.notna().sum())
+                if cnt > best_cnt:
+                    best_cnt, best_s = cnt, s
+            s = best_s if best_s is not None else pd.Series(index=idx, dtype=float, name=name)
+            return s.reindex(idx).astype(float)
+
+        # Series -> numeric 1D alignée
+        if isinstance(obj, pd.Series):
+            s = pd.to_numeric(obj, errors="coerce")
+            return s.reindex(idx).astype(float)
+
+        # Numpy / list / scalar
+        arr = _np.asarray(obj)
+        # 2D -> choisir la meilleure colonne
+        if arr.ndim == 2:
+            if arr.shape[0] != len(idx) and arr.shape[1] == len(idx):
+                arr = arr.T
+            if arr.shape[0] != len(idx):
+                return pd.Series(index=idx, dtype=float, name=name)
+            best_s, best_cnt = None, -1
+            for j in range(arr.shape[1]):
+                s = pd.Series(arr[:, j], index=idx, name=name)
+                s = pd.to_numeric(s, errors="coerce")
+                cnt = int(s.notna().sum())
+                if cnt > best_cnt:
+                    best_cnt, best_s = cnt, s
+            return (best_s if best_s is not None else pd.Series(index=idx, dtype=float, name=name)).astype(float)
+
+        # 1D ou scalaire -> Series alignée
+        try:
+            s = pd.Series(arr, index=idx, name=name)  # scalar -> broadcast
+        except Exception:
+            s = pd.Series(index=idx, dtype=float, name=name)
+        s = pd.to_numeric(s, errors="coerce")
+        return s.astype(float)
+
+    # 5) Reconstruire un DataFrame NEUF avec colonnes uniques & Series 1D
+    x_fix = pd.DataFrame(index=x.index)
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
+        if c in x.columns:
+            x_fix[c] = _force_series_any(x[c], c, x.index)
+
+    # 6) Garde seulement si Close exploitable
+    if "Close" not in x_fix.columns or x_fix["Close"].dropna().empty:
+        return pd.DataFrame()
+
+    return x_fix
 
 
 def _resample_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
