@@ -621,7 +621,6 @@ def compute_kpis_investor(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     close = w["Close"].astype(float)
-    vol = w["Volume"].astype(float) if "Volume" in w.columns else pd.Series(index=close.index, dtype=float)
 
     sma26 = close.rolling(26, min_periods=8).mean()
     sma52 = close.rolling(52, min_periods=13).mean()
@@ -681,7 +680,6 @@ def compute_score_investor(df: pd.DataFrame):
         return default
 
     c = last("W_Close")
-    sma26 = last("SMA26w")
     sma52 = last("SMA52w")
     pctH = last("%toHH52w", -0.2)
     mom = last("MOM_12m_minus_1m", 0.0)

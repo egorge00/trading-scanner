@@ -38,24 +38,24 @@ def build_sp500() -> pd.DataFrame:
     if not tabs:
         return pd.DataFrame(columns=["isin","ticker","name","market"])
     # La 1ère table est la liste des constituants
-    t = tabs[0].copy()
+    table = tabs[0].copy()
     # colonnes qui bougent rarement
     col_map = {"Symbol":"ticker","Security":"name"}
     for k in list(col_map.keys()):
-        if k not in t.columns:
+        if k not in table.columns:
             # fallback: ex. 'Symbol' parfois nommé 'Ticker symbol'
-            if k == "Symbol" and "Ticker symbol" in t.columns:
+            if k == "Symbol" and "Ticker symbol" in table.columns:
                 col_map["Ticker symbol"] = "ticker"
                 col_map.pop("Symbol")
-    t = t.rename(columns=col_map)
-    if "ticker" not in t.columns or "name" not in t.columns:
+    table = table.rename(columns=col_map)
+    if "ticker" not in table.columns or "name" not in table.columns:
         print("[WARN] S&P500: colonnes inattendues, on abandonne cette source.")
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    t["ticker"] = t["ticker"].astype(str).str.upper().str.strip()
-    t["name"] = t["name"].astype(str).str.strip()
-    t["isin"] = ""
-    t["market"] = "US"
-    out = t[["isin","ticker","name","market"]].dropna()
+    table["ticker"] = table["ticker"].astype(str).str.upper().str.strip()
+    table["name"] = table["name"].astype(str).str.strip()
+    table["isin"] = ""
+    table["market"] = "US"
+    out = table[["isin","ticker","name","market"]].dropna()
     print(f"[INFO] S&P500 rows: {len(out)}")
     return out
 
@@ -63,19 +63,21 @@ def build_cac40() -> pd.DataFrame:
     tabs = fetch_tables(W_CAC)
     if not tabs:
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    tb = next((x for x in tabs if "Company" in x.columns and ("Ticker" in x.columns or "Ticker symbol" in x.columns)), None)
-    if tb is None:
+    table = next((x for x in tabs if "Company" in x.columns and ("Ticker" in x.columns or "Ticker symbol" in x.columns)), None)
+    if table is None:
         print("[WARN] CAC40: table non trouvée")
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    col_tick = "Ticker" if "Ticker" in tb.columns else "Ticker symbol"
-    t = tb.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
-    t["ticker"] = (t["ticker"].astype(str)
-                   .str.replace(r"^EPA:", "", regex=True)
-                   .str.strip())
-    t["name"] = t["name"].astype(str).str.strip()
-    t["isin"] = ""
-    t["market"] = "FR"
-    out = t[["isin","ticker","name","market"]].dropna()
+    col_tick = "Ticker" if "Ticker" in table.columns else "Ticker symbol"
+    table = table.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
+    table["ticker"] = (
+        table["ticker"].astype(str)
+        .str.replace(r"^EPA:", "", regex=True)
+        .str.strip()
+    )
+    table["name"] = table["name"].astype(str).str.strip()
+    table["isin"] = ""
+    table["market"] = "FR"
+    out = table[["isin","ticker","name","market"]].dropna()
     print(f"[INFO] CAC40 rows: {len(out)}")
     return out
 
@@ -83,33 +85,34 @@ def build_eurostoxx50() -> pd.DataFrame:
     tabs = fetch_tables(W_ESTOXX)
     if not tabs:
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    tb = next((x for x in tabs if "Company" in x.columns), None)
-    if tb is None:
+    table = next((x for x in tabs if "Company" in x.columns), None)
+    if table is None:
         print("[WARN] ESTOXX50: table non trouvée")
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    t = tb.rename(columns={"Company":"name", "Ticker":"ticker"}).copy()
+    table = table.rename(columns={"Company":"name", "Ticker":"ticker"}).copy()
     def to_yahoo(sym: t.Any) -> str:
         s = str(sym).strip().upper()
         if any(s.endswith(suf) for suf in (".PA",".AS",".BR",".MI",".MC",".DE",".F",".BE",".SW",".VI",".LS",".IR",".OL",".HE",".VX",".DK",".FI",".NO",".SE",".L")):
             return s
         # pas de suffixe → on laisse vide (Option A)
         return ""
-    if "ticker" in t.columns:
-        t["ticker"] = t["ticker"].apply(to_yahoo)
+    if "ticker" in table.columns:
+        table["ticker"] = table["ticker"].apply(to_yahoo)
     else:
-        t["ticker"] = ""
-    t["name"] = t["name"].astype(str).str.strip()
-    t["isin"] = ""
+        table["ticker"] = ""
+    table["name"] = table["name"].astype(str).str.strip()
+    table["isin"] = ""
     def guess_market(tk: str) -> str:
         mapping = {
             ".PA":"FR",".DE":"DE",".F":"DE",".AS":"NL",".MI":"IT",".MC":"ES",".BE":"BE",
             ".SW":"CH",".VX":"CH",".LS":"PT",".DK":"DK",".FI":"FI",".NO":"NO",".SE":"SE",".L":"UK"
         }
         for suf, mkt in mapping.items():
-            if tk.endswith(suf): return mkt
+            if tk.endswith(suf):
+                return mkt
         return "EU"
-    t["market"] = t["ticker"].apply(guess_market)
-    out = t[["isin","ticker","name","market"]].drop_duplicates(subset=["name"]).reset_index(drop=True)
+    table["market"] = table["ticker"].apply(guess_market)
+    out = table[["isin","ticker","name","market"]].drop_duplicates(subset=["name"]).reset_index(drop=True)
     print(f"[INFO] EURO STOXX 50 rows: {len(out)}")
     return out
 
@@ -117,25 +120,26 @@ def build_ftse100() -> pd.DataFrame:
     tabs = fetch_tables(W_FTSE100)
     if not tabs:
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    tb = None
+    table = None
     for x in tabs:
         cols = set(map(str, x.columns))
         if "Company" in cols and ({"EPIC", "Ticker", "Ticker symbol"} & cols):
-            tb = x
+            table = x
             break
-    if tb is None:
+    if table is None:
         print("[WARN] FTSE100: table non trouvée")
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    col_tick = "EPIC" if "EPIC" in tb.columns else ("Ticker" if "Ticker" in tb.columns else "Ticker symbol")
-    t = tb.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
-    t["ticker"] = (t["ticker"].astype(str).str.upper().str.strip()
-                   .str.replace(r"\s+", "", regex=True))
+    col_tick = "EPIC" if "EPIC" in table.columns else ("Ticker" if "Ticker" in table.columns else "Ticker symbol")
+    table = table.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
+    table["ticker"] = (
+        table["ticker"].astype(str).str.upper().str.strip().str.replace(r"\s+", "", regex=True)
+    )
     # Yahoo Londres → suffixe .L
-    t["ticker"] = t["ticker"].apply(lambda s: f"{s}.L" if s and not s.endswith(".L") else s)
-    t["name"] = t["name"].astype(str).str.strip()
-    t["isin"] = ""
-    t["market"] = "UK"
-    out = t[["isin","ticker","name","market"]].dropna()
+    table["ticker"] = table["ticker"].apply(lambda s: f"{s}.L" if s and not s.endswith(".L") else s)
+    table["name"] = table["name"].astype(str).str.strip()
+    table["isin"] = ""
+    table["market"] = "UK"
+    out = table[["isin","ticker","name","market"]].dropna()
     print(f"[INFO] FTSE100 rows: {len(out)}")
     return out
 
@@ -143,33 +147,33 @@ def build_dax40() -> pd.DataFrame:
     tabs = fetch_tables(W_DAX)
     if not tabs:
         return pd.DataFrame(columns=["isin","ticker","name","market"])
-    tb = None
+    table = None
     for x in tabs:
         cols = set(map(str, x.columns))
         if "Company" in cols and ({"Ticker", "Ticker symbol", "Symbol"} & cols):
-            tb = x
+            table = x
             break
-    if tb is None:
+    if table is None:
         # fallback: noms seuls
         tb2 = next((x for x in tabs if "Company" in set(map(str, x.columns))), None)
         if tb2 is None:
             print("[WARN] DAX40: table non trouvée")
             return pd.DataFrame(columns=["isin","ticker","name","market"])
-        t2 = tb2.rename(columns={"Company":"name"}).copy()
-        t2["ticker"] = ""
-        t2["isin"] = ""
-        t2["market"] = "DE"
-        out2 = t2[["isin","ticker","name","market"]]
+        table_fallback = tb2.rename(columns={"Company":"name"}).copy()
+        table_fallback["ticker"] = ""
+        table_fallback["isin"] = ""
+        table_fallback["market"] = "DE"
+        out2 = table_fallback[["isin","ticker","name","market"]]
         print(f"[INFO] DAX40 rows (fallback, sans tickers): {len(out2)}")
         return out2
-    col_tick = "Ticker" if "Ticker" in tb.columns else ("Ticker symbol" if "Ticker symbol" in tb.columns else "Symbol")
-    t = tb.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
-    t["ticker"] = t["ticker"].astype(str).str.upper().str.strip()
-    t["ticker"] = t["ticker"].apply(lambda s: f"{s}.DE" if s and "." not in s else s)
-    t["name"] = t["name"].astype(str).str.strip()
-    t["isin"] = ""
-    t["market"] = "DE"
-    out = t[["isin","ticker","name","market"]].dropna()
+    col_tick = "Ticker" if "Ticker" in table.columns else ("Ticker symbol" if "Ticker symbol" in table.columns else "Symbol")
+    table = table.rename(columns={"Company":"name", col_tick:"ticker"}).copy()
+    table["ticker"] = table["ticker"].astype(str).str.upper().str.strip()
+    table["ticker"] = table["ticker"].apply(lambda s: f"{s}.DE" if s and "." not in s else s)
+    table["name"] = table["name"].astype(str).str.strip()
+    table["isin"] = ""
+    table["market"] = "DE"
+    out = table[["isin","ticker","name","market"]].dropna()
     print(f"[INFO] DAX40 rows: {len(out)}")
     return out
 
