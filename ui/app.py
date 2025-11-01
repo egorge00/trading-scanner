@@ -69,6 +69,48 @@ UNIVERSE_PATH = "data/watchlist.csv"
 MY_WATCHLIST_KEY = "my_watchlist_df"
 FULL_SCAN_WATCHLIST_KEY = "full_scan_watchlist_df"
 
+# ========= Full Scan Cache (CSV + META JSON) =========
+FULL_SCAN_RESULTS_PATH = "data/full_scan_results.csv"
+FULL_SCAN_META_PATH = "data/full_scan_meta.json"
+
+def ensure_data_dir():
+    os.makedirs("data", exist_ok=True)
+
+def save_full_scan_cache(df_out: pd.DataFrame, markets: list[str], query: str, limit: int):
+    ensure_data_dir()
+    df_out.to_csv(FULL_SCAN_RESULTS_PATH, index=False)
+    meta = {
+        "markets": sorted([m for m in markets if m and m != "(Tous)"]),
+        "query": (query or "").strip().lower(),
+        "limit": int(limit),
+        "timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(FULL_SCAN_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return meta
+
+def load_full_scan_cache():
+    try:
+        if not (os.path.exists(FULL_SCAN_RESULTS_PATH) and os.path.exists(FULL_SCAN_META_PATH)):
+            return None, None
+        df = pd.read_csv(FULL_SCAN_RESULTS_PATH)
+        with open(FULL_SCAN_META_PATH, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return df, meta
+    except Exception:
+        return None, None
+
+def cache_matches_filters(meta: dict, markets: list[str], query: str, limit: int) -> bool:
+    if not meta:
+        return False
+    want_markets = sorted([m for m in markets if m and m != "(Tous)"])
+    cur_markets = meta.get("markets", [])
+    return (
+        sorted(cur_markets) == sorted(want_markets)
+        and (meta.get("query", "") == (query or "").strip().lower())
+        and int(meta.get("limit", -1)) == int(limit)
+    )
+
 # ========= Helpers CSV =========
 def normalize_cols(df: pd.DataFrame, expected=("isin","ticker","name","market")) -> pd.DataFrame:
     lower = [c.lower() for c in df.columns]
@@ -478,7 +520,7 @@ with tab_full:
         markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
         sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
         query = colf2.text_input("Rechercher (ticker ou nom)", "")
-        limit = colf3.number_input("Limite", min_value=10, max_value=2000, value=300, step=10)
+        limit = colf3.number_input("Limite", min_value=10, max_value=2000, value=500, step=10)
 
         do_scan = colf4.form_submit_button("🚀 Lancer le scan complet")
 
@@ -494,7 +536,22 @@ with tab_full:
     tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    # ---------- 2) RÉSULTATS DU SCAN ----------
+    want_markets = sel_markets[:]
+    cached_df, cached_meta = load_full_scan_cache()
+    used_cache = False
+    if (
+        cached_df is not None
+        and cache_matches_filters(cached_meta, want_markets, query, limit)
+        and not do_scan
+    ):
+        used_cache = True
+        ts = cached_meta.get("timestamp", "?") if isinstance(cached_meta, dict) else "?"
+        st.success(f"Dernier scan chargé depuis le cache (filtres identiques) — {ts}")
+        st.dataframe(cached_df, use_container_width=True)
+        if st.button("🔄 Rafraîchir ce scan"):
+            do_scan = True
+            used_cache = False
+
     if do_scan:
         start = time.time()
         rows = []
@@ -594,7 +651,9 @@ with tab_full:
             ]
             out = out[[c for c in cols if c in out.columns]]
 
+            meta = save_full_scan_cache(out, sel_markets, query, int(limit))
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
+            st.caption(f"Sauvegardé comme 'dernier scan' — {meta.get('timestamp')}")
             st.dataframe(out, use_container_width=True)
 
             buffer = io.StringIO()
@@ -607,6 +666,15 @@ with tab_full:
             )
         else:
             st.info("Aucun résultat (tickers invalides ou indisponibles).")
+    elif used_cache and cached_df is not None:
+        buffer = io.StringIO()
+        cached_df.to_csv(buffer, index=False)
+        st.download_button(
+            "⬇️ Exporter résultats (CSV)",
+            data=buffer.getvalue().encode(),
+            file_name="scan_results.csv",
+            mime="text/csv",
+        )
 
     st.divider()
 
