@@ -413,8 +413,65 @@ with tab_full:
 
             out["Signal"] = out["Action"].map(to_signal)
 
-            cols = ["Ticker", "Name", "Signal", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20", "Action"]
-            out = out[[c for c in cols if c in out.columns]]
+            # --- Sauvegarde journalière ---
+            today = dt.date.today().strftime("%Y-%m-%d")
+            os.makedirs("data/scans", exist_ok=True)
+            daily_path = f"data/scans/{today}.csv"
+            try:
+                out.to_csv(daily_path, index=False)
+                st.caption(f"Résultats sauvegardés : {daily_path}")
+            except Exception as e:
+                st.warning(f"Impossible de sauvegarder le scan du jour: {e}")
+
+            # --- Comparaison classement vs veille ---
+            yesterday = (dt.date.today() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+            prev_path = f"data/scans/{yesterday}.csv"
+
+            try:
+                if os.path.exists(prev_path):
+                    prev = pd.read_csv(prev_path)
+
+                    # Rangs (1 = meilleur score)
+                    out["Rank_today"] = out["Score"].rank(ascending=False, method="min")
+                    if "Score" in prev.columns and "Ticker" in prev.columns:
+                        prev = prev.copy()
+                        prev["Rank_yesterday"] = prev["Score"].rank(ascending=False, method="min")
+                        merged = out.merge(prev[["Ticker", "Rank_yesterday"]], on="Ticker", how="left")
+
+                        def trend_from_ranks(row):
+                            ry = row.get("Rank_yesterday", float("nan"))
+                            rt = row.get("Rank_today", float("nan"))
+                            if pd.isna(ry):
+                                return "🆕"  # nouveau dans le classement
+                            if rt < ry:
+                                return "↗️"  # meilleur rang (monte)
+                            if rt > ry:
+                                return "↘️"  # pire rang (descend)
+                            return "🟰"  # même rang (optionnel)
+
+                        merged["Trend"] = merged.apply(trend_from_ranks, axis=1)
+                        out = merged
+                    else:
+                        st.info("Fichier de veille trouvé mais colonnes manquantes (Ticker/Score).")
+                else:
+                    st.info("Pas de fichier de veille — aucune comparaison de classement affichée.")
+            except Exception as e:
+                st.warning(f"Comparaison classement vs veille impossible: {e}")
+
+            # --- Réordonner les colonnes (Trend juste après Score) ---
+            cols_pref = [
+                "Ticker",
+                "Name",
+                "Signal",
+                "Score",
+                "Trend",
+                "RSI",
+                "MACD_hist",
+                "%toHH52",
+                "VolZ20",
+                "Action",
+            ]
+            out = out[[c for c in cols_pref if c in out.columns]]
 
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.dataframe(out, use_container_width=True)
