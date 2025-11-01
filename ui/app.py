@@ -16,7 +16,7 @@ from api.core.scoring import compute_kpis, compute_score
 from api.core.isin_resolver import resolve_isin_to_ticker
 
 # ---------- CONFIG ----------
-st.set_page_config(page_title="Scanner", layout="wide")
+st.set_page_config(page_title="Trading Scanner", layout="wide")
 
 # ---------- AUTH (simple & robuste) ----------
 USERNAME = "egorge"
@@ -295,7 +295,7 @@ with tab_scan:
         else:
             st.info("Tape un nom, un ISIN ou un ticker pour rechercher dans la base.")
 
-    st.markdown("---")
+    st.divider()
     st.subheader("📈 Scanner ma watchlist")
     run = st.button("🚀 Scanner maintenant (ma watchlist)")
     if run:
@@ -694,7 +694,7 @@ with tab_pos:
                 save_positions(pos)
                 st.success("Position ajoutée.")
 
-    st.markdown("---")
+    st.divider()
     st.subheader("Positions ouvertes — P&L & signaux")
 
     if pos.empty:
