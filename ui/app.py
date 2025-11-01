@@ -280,48 +280,94 @@ def get_name_for_ticker(tkr: str) -> str:
     return NAME_MAP.get(str(tkr).strip().upper(), "")
 
 # ========= Données marché + scoring =========
-@st.cache_data(show_spinner=False, ttl=60*60)
-def fetch_df_cached(ticker: str) -> pd.DataFrame | None:
+def score_one(ticker: str):
+    """Retourne les métriques de score ou un dict contenant une erreur explicite."""
+    tkr = _norm_ticker(ticker)
+    ok, why = validate_ticker(tkr)
+    if not ok:
+        return {"Ticker": tkr, "error": why}
+
     try:
         df = yf.download(
-            ticker, period="6mo", interval="1d",
-            group_by="column", auto_adjust=False, progress=False
+            tkr,
+            period="9mo",
+            interval="1d",
+            group_by="column",
+            auto_adjust=False,
+            progress=False,
         )
-        if isinstance(df.columns, pd.MultiIndex):
-            try:
-                df.columns = df.columns.get_level_values(0)
-            except Exception:
-                df = df.droplevel(1, axis=1)
-        needed = {"Open","High","Low","Close","Volume"}
-        if df.empty or not needed.issubset(df.columns):
-            return None
-        return df
-    except Exception:
-        return None
 
-def score_one(ticker: str):
-    df = fetch_df_cached(ticker)
-    if df is None:
-        return None
-    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            cols_lvl0 = df.columns.get_level_values(0)
+            wanted = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in cols_lvl0]
+            if wanted:
+                df = df[wanted]
+            df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+
+        if df is None or df.empty or "Close" not in df.columns:
+            return {"Ticker": tkr, "error": "no_data"}
+
+        df = df.dropna(subset=["Close"]).copy()
+        if df.empty:
+            return {"Ticker": tkr, "error": "no_close"}
+
         kpis = compute_kpis(df)
-        score, action, details = compute_score(df)
+        cs = compute_score(df)
+        if isinstance(cs, (list, tuple)):
+            score = float(cs[0]) if len(cs) > 0 and cs[0] is not None else float("nan")
+            action = str(cs[1]) if len(cs) > 1 and cs[1] is not None else ""
+            details = cs[2] if len(cs) > 2 and isinstance(cs[2], dict) else {}
+        else:
+            score = float(cs) if cs is not None else float("nan")
+            action = ""
+            details = {}
+
         last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
-        return {
-            "Ticker": ticker,
-            "Name": get_name_for_ticker(ticker),
-            "Score": float(score),
+
+        def _safe_float(val):
+            if val is None:
+                return None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        pct_to_hh52 = None
+        if "%toHH52" in kpis.columns:
+            pct_to_hh52 = kpis["%toHH52"].iloc[-1]
+        elif "pct_to_HH52" in kpis.columns:
+            pct_to_hh52 = kpis["pct_to_HH52"].iloc[-1] * 100.0
+
+        volz = None
+        if "VolZ20" in kpis.columns:
+            volz = kpis["VolZ20"].iloc[-1]
+
+        uni = load_universe_df()
+        name_series = uni.loc[uni["ticker"].astype(str).str.upper() == tkr, "name"]
+        name = ""
+        if not name_series.empty:
+            name_val = name_series.iloc[0]
+            if pd.notna(name_val):
+                name = str(name_val)
+
+        out = {
+            "Ticker": tkr,
+            "Name": name,
+            "Score": score,
             "Action": action,
-            "RSI": round(float(last.get("RSI", np.nan)), 1) if not kpis.empty else np.nan,
-            "MACD_hist": round(float(last.get("MACD_hist", np.nan)), 3) if not kpis.empty else np.nan,
-            "Close>SMA50": "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
-            "SMA50>SMA200": "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
-            "%toHH52": round(float(last.get("pct_to_HH52", np.nan)) * 100, 2) if not kpis.empty else np.nan,
-            "VolZ20": round(float(last.get("VolZ20", np.nan)), 2) if not kpis.empty else np.nan,
-            "Upside": details.get("p_up", np.nan),
+            "RSI": _safe_float(last.get("RSI")) if "RSI" in last else None,
+            "MACD_hist": _safe_float(last.get("MACD_hist")) if "MACD_hist" in last else None,
+            "%toHH52": _safe_float(pct_to_hh52) if pct_to_hh52 is not None else None,
+            "VolZ20": _safe_float(volz) if volz is not None else None,
+            "ActionRaw": action,
         }
-    except Exception:
-        return None
+
+        if isinstance(details, dict) and "p_up" in details:
+            out["Upside"] = details.get("p_up")
+
+        return out
+    except Exception as e:
+        return {"Ticker": tkr, "error": f"exception:{type(e).__name__}"}
 
 # ========= Recherche dans l'univers (nom / isin / ticker) =========
 def search_universe(query: str, topk: int = 50) -> pd.DataFrame:
@@ -397,9 +443,49 @@ def compute_pnl_row(row: pd.Series) -> dict:
 
 def signal_for_ticker(ticker: str) -> tuple[str, float] | None:
     res = score_one(ticker)
-    if not res: 
+    if not isinstance(res, dict) or res.get("error"):
         return None
-    return res.get("Action",""), float(res.get("Score", 0))
+    return res.get("Action", ""), float(res.get("Score", 0))
+
+
+# ===== Normalisation / Validation des tickers =====
+def _norm_ticker(x: str) -> str:
+    return str(x or "").strip().upper()
+
+
+@st.cache_data(ttl=3600)
+def load_universe_df() -> pd.DataFrame:
+    return load_universe()
+
+
+def validate_ticker(tkr: str) -> tuple[bool, str]:
+    """Vérifie si le ticker est présent dans l'univers et ressemble à un symbole Yahoo valide."""
+
+    t = _norm_ticker(tkr)
+    uni = load_universe_df()
+    if t in uni["ticker"].astype(str).str.upper().values:
+        return True, ""
+
+    import re
+
+    if not re.match(r"^[A-Z0-9\.-]{1,12}$", t):
+        return False, "format_ticker_invalide"
+    return False, "ticker_hors_univers"
+
+
+ERROR_REASON_MAP = {
+    "format_ticker_invalide": "Ticker invalide (format Yahoo)",
+    "ticker_hors_univers": "Ticker hors de l'univers suivi",
+    "no_data": "Aucune donnée renvoyée par Yahoo",
+    "no_close": "Pas de clôtures exploitables",
+    "invalid_return": "Retour invalide du scoreur",
+}
+
+
+def _format_failure_reason(error: str) -> str:
+    if isinstance(error, str) and error.startswith("exception:"):
+        return f"Erreur interne {error.split(':', 1)[1]}"
+    return ERROR_REASON_MAP.get(error, str(error))
 
 # ========= Onglets =========
 tab_full, tab_scan, tab_single, tab_pos = st.tabs(
@@ -427,6 +513,8 @@ with tab_scan:
                         to_add.append({"isin":r["isin"],"ticker":r["ticker"],"name":r["name"],"market":r["market"]})
                 if to_add:
                     add_df = normalize_cols(pd.DataFrame(to_add))
+                    if "ticker" in add_df.columns:
+                        add_df["ticker"] = add_df["ticker"].map(_norm_ticker)
                     my_wl = pd.concat([my_wl, add_df], ignore_index=True).drop_duplicates(subset=["isin","ticker"])
                     save_my_watchlist(my_wl)
                     st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
@@ -438,13 +526,23 @@ with tab_scan:
     run = st.button("🚀 Scanner maintenant (ma watchlist)")
     if run:
         rows = []
+        failures = []
         prog = st.progress(0)
-        tickers = my_wl.loc[my_wl["ticker"].astype(str).str.len() > 0, "ticker"].tolist()
+        tickers = [
+            _norm_ticker(t)
+            for t in my_wl.loc[my_wl["ticker"].astype(str).str.len() > 0, "ticker"].tolist()
+        ]
+        tickers = [t for t in tickers if t]
         n = len(tickers)
         for i, tkr in enumerate(tickers, start=1):
             prog.progress(i / max(n, 1))
             res = score_one(tkr)
-            if res is not None:
+            if not isinstance(res, dict):
+                failures.append({"Ticker": _norm_ticker(tkr), "error": "invalid_return"})
+                continue
+            if res.get("error"):
+                failures.append({"Ticker": res.get("Ticker", _norm_ticker(tkr)), "error": res["error"]})
+            else:
                 rows.append(res)
         if rows:
             df_out = (pd.DataFrame(rows)
@@ -470,12 +568,18 @@ with tab_scan:
                 with c4:
                     if st.button("🗑️ Retirer", key=f"del_{i}_{r['Ticker']}"):
                         before = len(my_wl)
-                        my_wl = my_wl[my_wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(drop=True)
+                        my_wl = my_wl[my_wl["ticker"] != _norm_ticker(r["Ticker"])].reset_index(drop=True)
                         save_my_watchlist(my_wl)
                         st.success(f"{r['Ticker']} supprimé ({before - len(my_wl)} ligne).")
                         st.rerun()
         else:
-            st.info("Aucun résultat (tickers invalides).")
+            st.info("Aucun résultat exploitable sur la watchlist (tous en erreur).")
+
+        if failures:
+            df_fail = pd.DataFrame(failures)
+            df_fail["raison"] = df_fail["error"].apply(_format_failure_reason)
+            with st.expander("Diagnostics watchlist (échecs)"):
+                st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
 
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
@@ -746,6 +850,8 @@ with tab_full:
                         )
                 if to_add:
                     add_df = pd.DataFrame(to_add)
+                    if "ticker" in add_df.columns:
+                        add_df["ticker"] = add_df["ticker"].map(_norm_ticker)
                     full_wl = pd.concat([full_wl, add_df], ignore_index=True)
                     full_wl = full_wl.drop_duplicates(subset=["ticker", "isin"]).reset_index(drop=True)
                     save_full_scan_watchlist(full_wl)
@@ -767,9 +873,19 @@ with tab_full:
         )
     else:
         rows_wl = []
+        failures = []
         for tkr in full_wl["ticker"].dropna().astype(str).str.strip().unique().tolist():
-            res = score_one(tkr)
-            if res:
+            norm_tkr = _norm_ticker(tkr)
+            if not norm_tkr:
+                failures.append({"Ticker": "", "error": "format_ticker_invalide"})
+                continue
+            res = score_one(norm_tkr)
+            if not isinstance(res, dict):
+                failures.append({"Ticker": norm_tkr, "error": "invalid_return"})
+                continue
+            if res.get("error"):
+                failures.append({"Ticker": res.get("Ticker", norm_tkr), "error": res["error"]})
+            else:
                 rows_wl.append(res)
 
         if rows_wl:
@@ -803,7 +919,7 @@ with tab_full:
                 with c3:
                     if st.button("🗑️", key=f"full_wl_del_{i}_{r['Ticker']}"):
                         wl = load_full_scan_watchlist()
-                        wl = wl[wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(
+                        wl = wl[wl["ticker"] != _norm_ticker(r["Ticker"])].reset_index(
                             drop=True
                         )
                         save_full_scan_watchlist(wl)
@@ -819,6 +935,12 @@ with tab_full:
             )
         else:
             st.info("Impossible de scorer la sélection (tickers invalides ou indisponibles).")
+
+        if failures:
+            df_fail = pd.DataFrame(failures)
+            df_fail["raison"] = df_fail["error"].apply(_format_failure_reason)
+            with st.expander("Diagnostics watchlist (échecs)"):
+                st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
 # --------- Onglet 💼 POSITIONS ---------
 with tab_pos:
     st.title("💼 Positions en cours")
