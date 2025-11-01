@@ -680,3 +680,48 @@ isin,ticker,name,market
 ,VNA.DE,Vonovia,DE
 ,ZAL.DE,Zalando,DE
 ,BX4.PA,Inv Cac x2,ETF
+,SPY,SPDR S&P 500,ETF
+,IVV,iShares Core S&P 500,ETF
+,VOO,Vanguard S&P 500,ETF
+,VTI,Vanguard Total Stock Market,ETF
+,QQQ,Invesco QQQ Trust,ETF
+,IWM,iShares Russell 2000,ETF
+,DIA,SPDR Dow Jones Industrial Average,ETF
+,MTUM,iShares MSCI USA Momentum,ETF
+,QUAL,iShares MSCI USA Quality,ETF
+,VLUE,iShares MSCI USA Value Factor,ETF
+,SIZE,iShares MSCI USA Size Factor,ETF
+,XLK,Technology Select Sector SPDR,ETF
+,XLY,Consumer Discretionary Select SPDR,ETF
+,XLP,Consumer Staples Select SPDR,ETF
+,XLE,Energy Select Sector SPDR,ETF
+,XLF,Financial Select Sector SPDR,ETF
+,XLV,Health Care Select Sector SPDR,ETF
+,XLI,Industrial Select Sector SPDR,ETF
+,XLU,Utilities Select Sector SPDR,ETF
+,XLB,Materials Select Sector SPDR,ETF
+,XLRE,Real Estate Select Sector SPDR,ETF
+,LQD,iShares iBoxx $ Inv Grade Corporate Bd,ETF
+,HYG,iShares iBoxx $ High Yield Corporate,ETF
+,TLT,iShares 20+ Year Treasury,ETF
+,IEF,iShares 7-10 Year Treasury,ETF
+,SHY,iShares 1-3 Year Treasury,ETF
+,GLD,SPDR Gold Shares,ETF
+,IAU,iShares Gold Trust,ETF
+,SLV,iShares Silver Trust,ETF
+,USO,United States Oil,ETF
+,VEA,Vanguard FTSE Developed Markets,ETF
+,VWO,Vanguard FTSE Emerging Markets,ETF
+,IEFA,iShares Core MSCI EAFE,ETF
+,IEMG,iShares Core MSCI Emerging Markets,ETF
+,VT,Vanguard Total World Stock,ETF
+,CSPX.L,iShares Core S&P 500 UCITS (GBP) Acc,ETF
+,SXR8.DE,iShares Core S&P 500 UCITS (EUR) Acc,ETF
+,VUAA.AS,Vanguard S&P 500 UCITS (EUR) Acc,ETF
+,VWCE.DE,Vanguard FTSE All-World UCITS (EUR) Acc,ETF
+,EQQQ.L,Invesco EQQQ NASDAQ-100 UCITS (GBP),ETF
+,IUSA.L,iShares S&P 500 UCITS (GBP) Dist,ETF
+,XD9U.DE,Xtrackers MSCI USA UCITS (EUR) Acc,ETF
+,VUKE.L,Vanguard FTSE 100 UCITS (GBP) Dist,ETF
+,IMEU.L,iShares Core MSCI Europe UCITS (GBP),ETF
+,EIMI.L,iShares Core MSCI EM IMI UCITS (GBP),ETF
