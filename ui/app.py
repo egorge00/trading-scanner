@@ -1002,13 +1002,19 @@ with tab_full:
     score_label = get_score_label()
     profile_current = get_analysis_profile()
 
-    uni = get_universe_normalized()
-    MARKETS_MAIN = ["US", "FR", "DE", "UK", "ETF"]
+    uni = get_universe_normalized().copy()
     uni["market_norm"] = uni["market"].apply(_norm_market)
-    markets_all = [m for m in MARKETS_MAIN if m in uni["market_norm"].unique().tolist()]
+
+    MARKETS_MAIN = ["US", "FR", "DE", "UK", "ETF"]
+
+    present = set(uni["market_norm"].dropna().unique().tolist())
+    markets_all = sorted(set([m for m in MARKETS_MAIN if m in present] + ["ETF"]))
 
     if "market_checks" not in st.session_state:
         st.session_state.market_checks = {m: True for m in markets_all}
+    else:
+        for m in markets_all:
+            st.session_state.market_checks.setdefault(m, True)
 
     with st.form(key="full_scan_form", clear_on_submit=False):
         c1, c2 = st.columns([1, 1])
@@ -1080,12 +1086,24 @@ with tab_full:
             rows, failures = [], []
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futs = {ex.submit(score_ticker_cached, t, profile): t for t in ticker_list}
+                st.info(
+                    f"🚀 Démarrage du scan sur {len(futs)} tickers ({', '.join(selected_markets)})…"
+                )
+                total = len(futs)
+                progress = st.progress(0, text=f"Scan en cours... (0/{total})")
+                done = 0
+
                 for fut in as_completed(futs):
                     res = fut.result()
+                    done += 1
+                    progress.progress(done / total, text=f"Scan en cours... ({done}/{total})")
                     if isinstance(res, dict) and res.get("error"):
                         failures.append(res)
                     else:
                         rows.append(res)
+
+                progress.empty()
+                st.success(f"✅ Scan terminé ({done}/{total}) valeurs traitées.")
             if rows:
                 out = (
                     pd.DataFrame(rows)
