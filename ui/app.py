@@ -13,6 +13,7 @@ import streamlit as st
 import yfinance as yf
 import concurrent.futures as cf
 import requests
+import traceback
 
 # --- rendre importable le package "api" depuis /ui ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -281,11 +282,13 @@ def get_name_for_ticker(tkr: str) -> str:
 
 # ========= Données marché + scoring =========
 def score_one(ticker: str):
-    """Retourne les métriques de score ou un dict contenant une erreur explicite."""
+    """Retourne un dict score ou {'Ticker':..., 'error': '...'} avec détail."""
     tkr = _norm_ticker(ticker)
     ok, why = validate_ticker(tkr)
     if not ok:
         return {"Ticker": tkr, "error": why}
+
+    st.session_state.pop("last_error_trace", None)
 
     try:
         df = yf.download(
@@ -296,13 +299,15 @@ def score_one(ticker: str):
             auto_adjust=False,
             progress=False,
         )
-
         if isinstance(df.columns, pd.MultiIndex):
-            cols_lvl0 = df.columns.get_level_values(0)
-            wanted = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in cols_lvl0]
-            if wanted:
-                df = df[wanted]
-            df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+            cols = [
+                c
+                for c in ["Open", "High", "Low", "Close", "Volume"]
+                if c in df.columns.get_level_values(0)
+            ]
+            if cols:
+                df = df[cols]
+                df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
 
         if df is None or df.empty or "Close" not in df.columns:
             return {"Ticker": tkr, "error": "no_data"}
@@ -313,61 +318,51 @@ def score_one(ticker: str):
 
         kpis = compute_kpis(df)
         cs = compute_score(df)
-        if isinstance(cs, (list, tuple)):
-            score = float(cs[0]) if len(cs) > 0 and cs[0] is not None else float("nan")
-            action = str(cs[1]) if len(cs) > 1 and cs[1] is not None else ""
-            details = cs[2] if len(cs) > 2 and isinstance(cs[2], dict) else {}
+        if isinstance(cs, (list, tuple)) and len(cs) >= 2:
+            score, action = cs[0], cs[1]
         else:
-            score = float(cs) if cs is not None else float("nan")
-            action = ""
-            details = {}
+            score, action = cs, None
 
-        last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
-
-        def _safe_float(val):
-            if val is None:
-                return None
+        action_val = None
+        if action is not None:
             try:
-                return float(val)
-            except (TypeError, ValueError):
-                return None
-
-        pct_to_hh52 = None
-        if "%toHH52" in kpis.columns:
-            pct_to_hh52 = kpis["%toHH52"].iloc[-1]
-        elif "pct_to_HH52" in kpis.columns:
-            pct_to_hh52 = kpis["pct_to_HH52"].iloc[-1] * 100.0
-
-        volz = None
-        if "VolZ20" in kpis.columns:
-            volz = kpis["VolZ20"].iloc[-1]
+                action_val = str(action)
+            except Exception:
+                action_val = None
 
         uni = load_universe_df()
-        name_series = uni.loc[uni["ticker"].astype(str).str.upper() == tkr, "name"]
         name = ""
-        if not name_series.empty:
-            name_val = name_series.iloc[0]
-            if pd.notna(name_val):
-                name = str(name_val)
+        try:
+            m = uni.loc[uni["ticker"].astype(str).str.upper() == tkr, "name"]
+            if not m.empty:
+                name = str(m.iloc[0])
+        except Exception:
+            pass
 
         out = {
             "Ticker": tkr,
             "Name": name,
-            "Score": score,
-            "Action": action,
-            "RSI": _safe_float(last.get("RSI")) if "RSI" in last else None,
-            "MACD_hist": _safe_float(last.get("MACD_hist")) if "MACD_hist" in last else None,
-            "%toHH52": _safe_float(pct_to_hh52) if pct_to_hh52 is not None else None,
-            "VolZ20": _safe_float(volz) if volz is not None else None,
-            "ActionRaw": action,
+            "Score": float(score) if score is not None else None,
+            "Action": action_val,
+            "RSI": float(kpis["RSI"].iloc[-1])
+            if isinstance(kpis, pd.DataFrame) and "RSI" in kpis
+            else None,
+            "MACD_hist": float(kpis["MACD_hist"].iloc[-1])
+            if isinstance(kpis, pd.DataFrame) and "MACD_hist" in kpis
+            else None,
+            "%toHH52": float(kpis["%toHH52"].iloc[-1])
+            if isinstance(kpis, pd.DataFrame) and "%toHH52" in kpis
+            else None,
+            "VolZ20": float(kpis["VolZ20"].iloc[-1])
+            if isinstance(kpis, pd.DataFrame) and "VolZ20" in kpis
+            else None,
         }
-
-        if isinstance(details, dict) and "p_up" in details:
-            out["Upside"] = details.get("p_up")
-
         return out
+
     except Exception as e:
-        return {"Ticker": tkr, "error": f"exception:{type(e).__name__}"}
+        err = f"exception:{type(e).__name__}:{e}"
+        st.session_state["last_error_trace"] = traceback.format_exc()
+        return {"Ticker": tkr, "error": err}
 
 # ========= Recherche dans l'univers (nom / isin / ticker) =========
 def search_universe(query: str, topk: int = 50) -> pd.DataFrame:
@@ -471,22 +466,6 @@ def validate_ticker(tkr: str) -> tuple[bool, str]:
     if not re.match(r"^[A-Z0-9\.-]{1,12}$", t):
         return False, "format_ticker_invalide"
     return False, "ticker_hors_univers"
-
-
-ERROR_REASON_MAP = {
-    "format_ticker_invalide": "Ticker invalide (format Yahoo)",
-    "ticker_hors_univers": "Ticker hors de l'univers suivi",
-    "no_data": "Aucune donnée renvoyée par Yahoo",
-    "no_close": "Pas de clôtures exploitables",
-    "invalid_return": "Retour invalide du scoreur",
-}
-
-
-def _format_failure_reason(error: str) -> str:
-    if isinstance(error, str) and error.startswith("exception:"):
-        return f"Erreur interne {error.split(':', 1)[1]}"
-    return ERROR_REASON_MAP.get(error, str(error))
-
 # ========= Onglets =========
 tab_full, tab_scan, tab_single, tab_pos = st.tabs(
     ["🚀 Scanner complet", "🔎 Scanner (watchlist)", "📄 Fiche valeur", "💼 Positions"]
@@ -577,9 +556,35 @@ with tab_scan:
 
         if failures:
             df_fail = pd.DataFrame(failures)
-            df_fail["raison"] = df_fail["error"].apply(_format_failure_reason)
+
+            MAP = {
+                "format_ticker_invalide": "Ticker invalide (format Yahoo).",
+                "ticker_hors_univers": "Ticker hors de l'univers suivi (ajoute-le ou corrige le suffixe .PA/.DE/.L...).",
+                "no_data": "Aucune donnée renvoyée par Yahoo (symbole invalide ou indisponible).",
+                "no_close": "Pas de clôtures exploitables.",
+                "invalid_return": "Retour invalide du scoreur.",
+            }
+
+            def _reason(e):
+                if isinstance(e, str) and e.startswith("exception:"):
+                    return "Erreur interne: " + e.split(":", 2)[1]
+                return MAP.get(e, str(e))
+
+            df_fail["raison"] = df_fail["error"].apply(_reason)
             with st.expander("Diagnostics watchlist (échecs)"):
                 st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+                tr = st.session_state.get("last_error_trace")
+                if tr:
+                    st.code(tr, language="python")
+
+    with st.expander("Test rapide scoring"):
+        t = st.text_input("Ticker de test", "AAPL", key="test_score_one_ticker")
+        if st.button("Tester score_one", key="test_score_one_button"):
+            r = score_one(t)
+            st.write(r)
+            tr = st.session_state.get("last_error_trace")
+            if tr:
+                st.code(tr, language="python")
 
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
@@ -938,9 +943,26 @@ with tab_full:
 
         if failures:
             df_fail = pd.DataFrame(failures)
-            df_fail["raison"] = df_fail["error"].apply(_format_failure_reason)
+
+            MAP = {
+                "format_ticker_invalide": "Ticker invalide (format Yahoo).",
+                "ticker_hors_univers": "Ticker hors de l'univers suivi (ajoute-le ou corrige le suffixe .PA/.DE/.L...).",
+                "no_data": "Aucune donnée renvoyée par Yahoo (symbole invalide ou indisponible).",
+                "no_close": "Pas de clôtures exploitables.",
+                "invalid_return": "Retour invalide du scoreur.",
+            }
+
+            def _reason(e):
+                if isinstance(e, str) and e.startswith("exception:"):
+                    return "Erreur interne: " + e.split(":", 2)[1]
+                return MAP.get(e, str(e))
+
+            df_fail["raison"] = df_fail["error"].apply(_reason)
             with st.expander("Diagnostics watchlist (échecs)"):
                 st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+                tr = st.session_state.get("last_error_trace")
+                if tr:
+                    st.code(tr, language="python")
 # --------- Onglet 💼 POSITIONS ---------
 with tab_pos:
     st.title("💼 Positions en cours")
