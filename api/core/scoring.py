@@ -142,53 +142,76 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
 
-    def _force_series_any(obj, name, idx) -> pd.Series:
+    def _best_series_from_dataframe(df_like: pd.DataFrame, idx, name: str) -> pd.Series:
+        """
+        Sélectionne la colonne la plus 'complète' d'un DataFrame (max non-NaN),
+        la convertit en float et l'aligne sur idx.
+        """
+        if df_like.shape[1] == 0:
+            return pd.Series(index=idx, dtype=float, name=name)
+        best_s, best_cnt = None, -1
+        for j in range(df_like.shape[1]):
+            s = df_like.iloc[:, j]
+            if not isinstance(s, pd.Series):
+                s = pd.Series(s, index=df_like.index, name=name)
+            s = pd.to_numeric(s, errors="coerce")
+            cnt = int(s.notna().sum())
+            if cnt > best_cnt:
+                best_cnt, best_s = cnt, s
+        if best_s is None:
+            return pd.Series(index=idx, dtype=float, name=name)
+        return best_s.reindex(idx).astype(float)
+
+    def _force_series_any(obj, name: str, idx) -> pd.Series:
         """
         Retourne TOUJOURS une pd.Series[float] alignée sur idx, quelle que soit la forme d'entrée :
         - Series -> numeric float
         - DataFrame -> choisit la colonne la plus complète
-        - ndarray/list/scalar -> Series alignée (broadcast si scalaire)
+        - ndarray 2D -> choisit la colonne la plus complète
+        - ndarray 1D / list / scalar -> Series alignée (broadcast si scalaire)
         """
-        # 1) DataFrame (doublons de colonnes "Close", etc.)
+        # 1) DataFrame (doublons "Close", etc.)
         if isinstance(obj, pd.DataFrame):
-            if obj.shape[1] == 0:
-                return pd.Series(index=idx, dtype=float, name=name)
-            if obj.shape[1] == 1:
-                s = obj.iloc[:, 0]
-            else:
-                # Convertir chaque colonne en Series float et choisir celle avec le plus de non-NaN
-                best_s, best_cnt = None, -1
-                for col in obj.columns:
-                    col_vals = obj[col]
-                    # S'assurer d'avoir une Series (au cas où)
-                    if not isinstance(col_vals, pd.Series):
-                        col_vals = pd.Series(col_vals, index=obj.index, name=name)
-                    col_vals = pd.to_numeric(col_vals, errors="coerce")
-                    cnt = int(col_vals.notna().sum())
-                    if cnt > best_cnt:
-                        best_cnt = cnt
-                        best_s = col_vals
-                s = best_s if best_s is not None else pd.Series(index=obj.index, dtype=float, name=name)
-            # Alignement + cast float
-            s = s.reindex(idx)
-            return s.astype(float)
+            return _best_series_from_dataframe(obj, idx, name)
 
         # 2) Series
         if isinstance(obj, pd.Series):
             s = pd.to_numeric(obj, errors="coerce")
-            s = s.reindex(idx)
-            return s.astype(float)
+            return s.reindex(idx).astype(float)
 
-        # 3) Tout le reste (ndarray/list/scalar/None) -> Series alignée
+        # 3) Numpy array / listes / scalaires
+        import numpy as np
+
+        arr = np.asarray(obj)
+        # 3a) 2D: choisir la meilleure colonne
+        if arr.ndim == 2:
+            if arr.shape[0] != len(idx):
+                # si transposé par erreur, on tente l'autre orientation
+                if arr.shape[1] == len(idx):
+                    arr = arr.T
+                else:
+                    # forme inexploitables -> Série vide
+                    return pd.Series(index=idx, dtype=float, name=name)
+            best_s, best_cnt = None, -1
+            for j in range(arr.shape[1]):
+                s = pd.Series(arr[:, j], index=idx, name=name)
+                s = pd.to_numeric(s, errors="coerce")
+                cnt = int(s.notna().sum())
+                if cnt > best_cnt:
+                    best_cnt, best_s = cnt, s
+            if best_s is None:
+                return pd.Series(index=idx, dtype=float, name=name)
+            return best_s.astype(float)
+
+        # 3b) 1D (ou scalaire broadcast)
         try:
-            s = pd.Series(obj, index=idx, name=name)  # scalar => broadcast auto
+            s = pd.Series(arr, index=idx, name=name)
         except Exception:
             s = pd.Series(index=idx, dtype=float, name=name)
         s = pd.to_numeric(s, errors="coerce")
-        s = s.reindex(idx)
         return s.astype(float)
 
-    # Réécriture colonne par colonne (sans passer par dict -> DataFrame)
+    # Réécriture colonne par colonne (sans dict -> DataFrame)
     for c in cols:
         x[c] = _force_series_any(x[c], c, x.index)
 
