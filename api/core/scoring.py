@@ -117,8 +117,9 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
 
 def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     """
-    KPIs basiques robustes.
-    Colonnes retournées: RSI, MACD_hist, SMA50, SMA200, %toHH52, VolZ20
+    Calcule des KPIs robustes pour les tickers Yahoo Finance.
+    Colonnes: RSI, MACD_hist, SMA50, SMA200, %toHH52, VolZ20
+    Corrigé pour gérer doublons et MultiIndex.
     """
 
     if df is None or df.empty:
@@ -126,7 +127,7 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
 
     x = df.copy()
 
-    # 1) Aplatir MultiIndex éventuel (yfinance)
+    # --- 1) Aplatir MultiIndex éventuel ---
     if isinstance(x.columns, pd.MultiIndex):
         lvl0 = x.columns.get_level_values(0)
         keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
@@ -137,31 +138,43 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         else:
             x = x.droplevel(-1, axis=1)
 
-    # 2) Ne garder que OHLCV & caster en numérique
+    # --- 2) Coalescer les colonnes OHLCV ---
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
 
-    # Coalescer chaque champ OHLCV en une Series numérique unique
-    fixed: Dict[str, pd.Series] = {}
-    for c in cols:
-        obj = x[c]
-        if isinstance(obj, pd.DataFrame):
-            best = obj.count().idxmax()
-            ser = obj[best]
-        else:
-            ser = obj
-        ser = pd.to_numeric(ser, errors="coerce").astype(float)
-        fixed[c] = ser
+    def _ensure_series(obj, colname, idx):
+        """Retourne une Series float alignée sur idx."""
 
+        if isinstance(obj, pd.Series):
+            return pd.to_numeric(obj, errors="coerce").astype(float)
+
+        if isinstance(obj, pd.DataFrame):
+            if obj.shape[1] == 1:
+                ser = obj.iloc[:, 0]
+            else:
+                cand = obj.apply(lambda s: pd.to_numeric(s, errors="coerce").astype(float))
+                best_col = cand.count().idxmax()
+                ser = cand[best_col]
+            ser.name = colname
+            return ser.astype(float)
+
+        # Fallback: list, ndarray, scalar, None...
+        try:
+            ser = pd.Series(obj, index=idx, name=colname)
+        except Exception:
+            ser = pd.Series(index=idx, dtype=float, name=colname)
+        return pd.to_numeric(ser, errors="coerce").astype(float)
+
+    fixed = {c: _ensure_series(x[c], c, x.index) for c in cols}
     x = pd.DataFrame(fixed).sort_index()
 
+    # --- 3) Close / Volume propres ---
     if "Close" not in x.columns:
         return pd.DataFrame()
-
     close = x["Close"].astype(float)
     vol = x["Volume"] if "Volume" in x.columns else pd.Series(index=close.index, dtype=float)
 
-    # 3) RSI(14) EMA
+    # --- 4) RSI(14) ---
     delta = close.diff()
     up = delta.clip(lower=0.0)
     down = -delta.clip(upper=0.0)
@@ -170,22 +183,22 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     rs = roll_up / roll_down
     rsi = 100.0 - (100.0 / (1.0 + rs))
 
-    # 4) MACD 12/26 + hist
+    # --- 5) MACD (12/26 EMA) + histogramme ---
     ema12 = close.ewm(span=12, adjust=False, min_periods=6).mean()
     ema26 = close.ewm(span=26, adjust=False, min_periods=13).mean()
     macd = ema12 - ema26
     sig = macd.ewm(span=9, adjust=False, min_periods=5).mean()
     macd_hist = macd - sig
 
-    # 5) SMA50 / SMA200
+    # --- 6) SMA50 / SMA200 ---
     sma50 = close.rolling(50, min_periods=25).mean()
     sma200 = close.rolling(200, min_periods=50).mean()
 
-    # 6) % distance au plus haut 52s
+    # --- 7) Plus haut 52 semaines ---
     hh52 = close.rolling(252, min_periods=60).max()
     pct_to_hh52 = close / hh52 - 1.0
 
-    # 7) Z-score Volume(20)
+    # --- 8) Z-score Volume(20) ---
     if vol is not None and vol.notna().any():
         vma20 = vol.rolling(20, min_periods=10).mean()
         vstd20 = vol.rolling(20, min_periods=10).std(ddof=0)
@@ -204,8 +217,8 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         },
         index=close.index,
     )
-    return out
 
+    return out
 
 def _dynamic_weights(rv: float | pd.Series | None) -> Tuple[Dict[str, float], float, float]:
     """Allocate dynamic weights between momentum and mean-reversion blocks."""
