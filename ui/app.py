@@ -68,13 +68,11 @@ if st.sidebar.button("Se déconnecter"):
 UNIVERSE_PATH = "data/watchlist.csv"
 MY_WATCHLIST_KEY = "my_watchlist_df"
 FULL_SCAN_WATCHLIST_KEY = "full_scan_watchlist_df"
+FULL_SCAN_WATCHLIST_PATH = "data/full_scan_watchlist.csv"
 
 # ========= Full Scan Cache (CSV + META JSON) =========
 FULL_SCAN_RESULTS_PATH = "data/full_scan_results.csv"
 FULL_SCAN_META_PATH = "data/full_scan_meta.json"
-
-def ensure_data_dir():
-    os.makedirs("data", exist_ok=True)
 
 def save_full_scan_cache(df_out: pd.DataFrame, markets: list[str], query: str, limit: int):
     ensure_data_dir()
@@ -149,15 +147,12 @@ def load_my_watchlist() -> pd.DataFrame:
 def save_my_watchlist(df: pd.DataFrame):
     st.session_state[MY_WATCHLIST_KEY] = normalize_cols(df)
 
-def load_full_scan_watchlist() -> pd.DataFrame:
-    if FULL_SCAN_WATCHLIST_KEY in st.session_state:
-        return st.session_state[FULL_SCAN_WATCHLIST_KEY].copy()
-    df = pd.DataFrame(columns=["isin", "ticker", "name", "market"])
-    st.session_state[FULL_SCAN_WATCHLIST_KEY] = df.copy()
-    return df
+# ========= Persistance locale : watchlist du Scanner complet =========
+def ensure_data_dir():
+    os.makedirs("data", exist_ok=True)
 
-def save_full_scan_watchlist(df: pd.DataFrame):
-    cols = ["isin", "ticker", "name", "market"]
+def _normalize_full_wl(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["isin","ticker","name","market"]
     for c in cols:
         if c not in df.columns:
             df[c] = ""
@@ -166,7 +161,35 @@ def save_full_scan_watchlist(df: pd.DataFrame):
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df["name"] = df["name"].astype(str).str.strip()
     df["market"] = df["market"].astype(str).str.strip()
+    return df
+
+def load_full_scan_watchlist() -> pd.DataFrame:
+    # 1) session
+    if FULL_SCAN_WATCHLIST_KEY in st.session_state:
+        return st.session_state[FULL_SCAN_WATCHLIST_KEY].copy()
+    # 2) disque (CSV)
+    try:
+        if os.path.exists(FULL_SCAN_WATCHLIST_PATH):
+            df = pd.read_csv(FULL_SCAN_WATCHLIST_PATH)
+            df = _normalize_full_wl(df)
+            st.session_state[FULL_SCAN_WATCHLIST_KEY] = df.copy()
+            return df
+    except Exception:
+        pass
+    # 3) vide
+    df = _normalize_full_wl(pd.DataFrame(columns=["isin","ticker","name","market"]))
     st.session_state[FULL_SCAN_WATCHLIST_KEY] = df.copy()
+    return df
+
+def save_full_scan_watchlist(df: pd.DataFrame):
+    df = _normalize_full_wl(df)
+    st.session_state[FULL_SCAN_WATCHLIST_KEY] = df.copy()
+    try:
+        ensure_data_dir()
+        df.to_csv(FULL_SCAN_WATCHLIST_PATH, index=False)
+    except Exception:
+        # on ne casse pas l'UI si l'écriture échoue (ex: FS en read-only)
+        pass
 
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
