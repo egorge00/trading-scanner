@@ -142,34 +142,57 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
 
-    def _as_series(obj, name, idx):
-        """Retourne TOUJOURS une pd.Series[float] alignée sur idx."""
-
-        if isinstance(obj, pd.Series):
-            s = pd.to_numeric(obj, errors="coerce").astype(float)
-            return s.reindex(idx)
+    def _force_series_any(obj, name, idx) -> pd.Series:
+        """
+        Retourne TOUJOURS une pd.Series[float] alignée sur idx, quelle que soit la forme d'entrée :
+        - Series -> numeric float
+        - DataFrame -> choisit la colonne la plus complète
+        - ndarray/list/scalar -> Series alignée (broadcast si scalaire)
+        """
+        # 1) DataFrame (doublons de colonnes "Close", etc.)
         if isinstance(obj, pd.DataFrame):
+            if obj.shape[1] == 0:
+                return pd.Series(index=idx, dtype=float, name=name)
             if obj.shape[1] == 1:
                 s = obj.iloc[:, 0]
             else:
-                cand = obj.apply(lambda s: pd.to_numeric(s, errors="coerce").astype(float))
-                best = cand.count().idxmax()
-                s = cand[best]
-            s = pd.to_numeric(s, errors="coerce").astype(float)
-            return s.reindex(idx)
-        # Fallback: liste/ndarray/scalar/None → Série alignée
+                # Convertir chaque colonne en Series float et choisir celle avec le plus de non-NaN
+                best_s, best_cnt = None, -1
+                for col in obj.columns:
+                    col_vals = obj[col]
+                    # S'assurer d'avoir une Series (au cas où)
+                    if not isinstance(col_vals, pd.Series):
+                        col_vals = pd.Series(col_vals, index=obj.index, name=name)
+                    col_vals = pd.to_numeric(col_vals, errors="coerce")
+                    cnt = int(col_vals.notna().sum())
+                    if cnt > best_cnt:
+                        best_cnt = cnt
+                        best_s = col_vals
+                s = best_s if best_s is not None else pd.Series(index=obj.index, dtype=float, name=name)
+            # Alignement + cast float
+            s = s.reindex(idx)
+            return s.astype(float)
+
+        # 2) Series
+        if isinstance(obj, pd.Series):
+            s = pd.to_numeric(obj, errors="coerce")
+            s = s.reindex(idx)
+            return s.astype(float)
+
+        # 3) Tout le reste (ndarray/list/scalar/None) -> Series alignée
         try:
-            s = pd.Series(obj, index=idx, name=name)
+            s = pd.Series(obj, index=idx, name=name)  # scalar => broadcast auto
         except Exception:
             s = pd.Series(index=idx, dtype=float, name=name)
-        s = pd.to_numeric(s, errors="coerce").astype(float)
-        return s.reindex(idx)
+        s = pd.to_numeric(s, errors="coerce")
+        s = s.reindex(idx)
+        return s.astype(float)
 
-    # Réécrire colonne par colonne (pas de dict -> DataFrame)
+    # Réécriture colonne par colonne (sans passer par dict -> DataFrame)
     for c in cols:
-        x[c] = _as_series(x[c], c, x.index)
+        x[c] = _force_series_any(x[c], c, x.index)
 
-    # Si Close absent ou vide après nettoyage → rien à faire
+    # Si Close est absent ou vide après nettoyage, on stoppe proprement
     if "Close" not in x.columns or x["Close"].dropna().empty:
         return pd.DataFrame()
 
