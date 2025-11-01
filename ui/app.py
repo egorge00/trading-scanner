@@ -73,13 +73,7 @@ if st.sidebar.button("Se déconnecter"):
 with st.expander("Test compute_score"):
     t = st.text_input("Ticker test", "AAPL")
     if st.button("Tester"):
-        df = yf.download(
-            t,
-            period="9mo",
-            interval="1d",
-            group_by="column",
-            progress=False,
-        )
+        df = safe_yf_download(t, period="9mo", interval="1d")
         st.write("Colonnes df:", list(df.columns))
         try:
             st.write("Résultat:", compute_score(df))
@@ -302,6 +296,65 @@ def get_name_for_ticker(tkr: str) -> str:
     return NAME_MAP.get(str(tkr).strip().upper(), "")
 
 # ========= Données marché + scoring =========
+
+@st.cache_data(ttl=900, show_spinner=False)
+def safe_yf_download(tkr: str, period="9mo", interval="1d") -> pd.DataFrame:
+    """
+    Télécharge des quotes pour tkr de manière robuste.
+    1) download(..., threads=False) sans group_by pour éviter MultiIndex/cache bugs
+    2) fallback Ticker(tkr).history(...)
+    3) fallback avec auto_adjust=True
+    Retourne un DF plat avec colonnes OHLCV si dispo, sinon DF vide.
+    """
+    import yfinance as yf
+
+    # Tentative 1 : download threads=False
+    try:
+        df = yf.download(
+            tickers=tkr,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                lvl0 = df.columns.get_level_values(0)
+                keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
+                if keep:
+                    df = df[keep]
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+            if cols:
+                return df[cols].copy()
+    except Exception:
+        pass
+
+    # Tentative 2 : Ticker().history auto_adjust=False
+    try:
+        h = yf.Ticker(tkr).history(period=period, interval=interval, auto_adjust=False)
+        if isinstance(h, pd.DataFrame) and not h.empty:
+            cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in h.columns]
+            if cols:
+                return h[cols].copy()
+    except Exception:
+        pass
+
+    # Tentative 3 : Ticker().history auto_adjust=True (au cas où)
+    try:
+        h = yf.Ticker(tkr).history(period=period, interval=interval, auto_adjust=True)
+        if isinstance(h, pd.DataFrame) and not h.empty:
+            cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in h.columns]
+            if cols:
+                return h[cols].copy()
+    except Exception:
+        pass
+
+    return pd.DataFrame()
+
+
 def score_one(ticker: str):
     """Thread-safe: ne modifie pas st.session_state. Retourne un dict score ou {'error','trace'}."""
     tkr = _norm_ticker(ticker)
@@ -310,15 +363,7 @@ def score_one(ticker: str):
         return {"Ticker": tkr, "error": why}
 
     try:
-        df = yf.download(tkr, period="9mo", interval="1d", group_by="column",
-                         auto_adjust=False, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            cols = [c for c in ["Open","High","Low","Close","Volume"]
-                    if c in df.columns.get_level_values(0)]
-            if cols:
-                df = df[cols]
-                df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
-
+        df = safe_yf_download(tkr, period="9mo", interval="1d")
         if df is None or df.empty or "Close" not in df.columns:
             return {"Ticker": tkr, "error": "no_data"}
 
