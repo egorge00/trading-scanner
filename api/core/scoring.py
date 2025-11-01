@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+import os
+
 import numpy as np
 import pandas as pd
+
+
+DEBUG = bool(os.getenv("DEBUG", "0") == "1")
 
 
 def _ema(series: pd.Series, span: int) -> pd.Series:
