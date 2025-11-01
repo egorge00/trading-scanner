@@ -117,11 +117,8 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
 
 def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calcule un panneau d'indicateurs nettoyés et alignés sur l'index fourni.
-
-    Cette implémentation aplatit un éventuel MultiIndex (typiquement issu de
-    yfinance), force les colonnes OHLCV à être numériques et garantit que la
-    clôture est manipulée sous forme de série float strictement ordonnée.
+    KPIs basiques robustes.
+    Colonnes retournées: RSI, MACD_hist, SMA50, SMA200, %toHH52, VolZ20
     """
 
     if df is None or df.empty:
@@ -129,6 +126,7 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
 
     x = df.copy()
 
+    # 1) Aplatir MultiIndex éventuel (yfinance)
     if isinstance(x.columns, pd.MultiIndex):
         lvl0 = x.columns.get_level_values(0)
         keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
@@ -139,10 +137,9 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         else:
             x = x.droplevel(-1, axis=1)
 
+    # 2) Ne garder que OHLCV & caster en numérique
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
-    x = x[cols].copy()
-
-    x = x.sort_index()
+    x = x[cols].copy().sort_index()
     for c in x.columns:
         x[c] = pd.to_numeric(x[c], errors="coerce")
 
@@ -150,10 +147,9 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     close = x["Close"].astype(float)
-    high = x["High"].astype(float) if "High" in x.columns else pd.Series(index=close.index, dtype=float)
-    low = x["Low"].astype(float) if "Low" in x.columns else pd.Series(index=close.index, dtype=float)
-    vol = x["Volume"].astype(float) if "Volume" in x.columns else pd.Series(index=close.index, dtype=float)
+    vol = x["Volume"] if "Volume" in x.columns else pd.Series(index=close.index, dtype=float)
 
+    # 3) RSI(14) EMA
     delta = close.diff()
     up = delta.clip(lower=0.0)
     down = -delta.clip(upper=0.0)
@@ -162,50 +158,40 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     rs = roll_up / roll_down
     rsi = 100.0 - (100.0 / (1.0 + rs))
 
+    # 4) MACD 12/26 + hist
     ema12 = close.ewm(span=12, adjust=False, min_periods=6).mean()
     ema26 = close.ewm(span=26, adjust=False, min_periods=13).mean()
     macd = ema12 - ema26
-    macd_signal = macd.ewm(span=9, adjust=False, min_periods=5).mean()
-    macd_hist = macd - macd_signal
+    sig = macd.ewm(span=9, adjust=False, min_periods=5).mean()
+    macd_hist = macd - sig
 
+    # 5) SMA50 / SMA200
     sma50 = close.rolling(50, min_periods=25).mean()
     sma200 = close.rolling(200, min_periods=50).mean()
 
+    # 6) % distance au plus haut 52s
     hh52 = close.rolling(252, min_periods=60).max()
     pct_to_hh52 = close / hh52 - 1.0
 
-    if vol.notna().any():
+    # 7) Z-score Volume(20)
+    if vol is not None and vol.notna().any():
         vma20 = vol.rolling(20, min_periods=10).mean()
         vstd20 = vol.rolling(20, min_periods=10).std(ddof=0)
         volz20 = (vol - vma20) / vstd20
     else:
         volz20 = pd.Series(index=close.index, dtype=float)
-    volz20 = volz20.replace([np.inf, -np.inf], np.nan)
-
-    bbp = _bollinger_bbp(close)
-    adx = _adx(high, low, close) if "High" in x.columns and "Low" in x.columns else pd.Series(index=close.index, dtype=float)
-    mr = _mean_reversion_score(close)
 
     out = pd.DataFrame(
         {
-            "Close": close,
             "RSI": rsi,
-            "MACD": macd,
-            "MACD_signal": macd_signal,
             "MACD_hist": macd_hist,
             "SMA50": sma50,
             "SMA200": sma200,
-            "close_above_sma50": (close > sma50).astype(int),
-            "BBP": bbp,
-            "VolZ20": volz20,
-            "pct_to_HH52": pct_to_hh52,
             "%toHH52": pct_to_hh52,
-            "ADX": adx,
-            "MR": mr,
+            "VolZ20": volz20,
         },
         index=close.index,
     )
-
     return out
 
 
@@ -341,90 +327,60 @@ def _aggregate_score(subscores: Dict[str, float], weights: Dict[str, float]) -> 
 def compute_score(df: pd.DataFrame):
     """
     Retourne (score, action).
-    Utilise uniquement l'accès par crochets et garantit close_above_sma50.
+    Accès colonnes via crochets; garantit close_above_sma50.
     """
 
-    # 1) KPIs
-    k = compute_kpis(df)  # Doit au moins contenir: RSI, MACD_hist, SMA50, SMA200, %toHH52, VolZ20 (si dispo)
+    k = compute_kpis(df)
 
-    # 2) Garanties minimales de colonnes
-    # SMA50 si absent
+    # Garanties minimales
     if "SMA50" not in k.columns:
         k["SMA50"] = df["Close"].rolling(50, min_periods=25).mean()
-
-    # close_above_sma50 si absent
     if "close_above_sma50" not in k.columns:
         k["close_above_sma50"] = (df["Close"] > k["SMA50"]).astype(int)
 
-    # 3) Récup des dernières valeurs en sécurité
     def last(col, default=np.nan):
-        if col in k.columns and k[col].notna().any():
-            try:
-                return float(k[col].dropna().iloc[-1])
-            except Exception:
-                return default
+        if col in k.columns:
+            s = k[col].dropna()
+            if not s.empty:
+                try:
+                    return float(s.iloc[-1])
+                except Exception:
+                    return default
         return default
 
-    rsi = last("RSI")
-    macd_h = last("MACD_hist")
-    sma50 = last("SMA50")
-    sma200 = last("SMA200")
-    pct_hh52 = last("%toHH52")
-    volz20 = last("VolZ20")
-    close = float(df["Close"].dropna().iloc[-1]) if "Close" in df.columns and df["Close"].notna().any() else np.nan
-    above50 = int(k["close_above_sma50"].dropna().iloc[-1]) if k["close_above_sma50"].notna().any() else 0
+    rsi = last("RSI", 50.0)
+    macd_h = last("MACD_hist", 0.0)
+    sma50 = last("SMA50", np.nan)
+    sma200 = last("SMA200", np.nan)
+    pct_hh52 = last("%toHH52", -0.2)
+    volz20 = last("VolZ20", 0.0)
 
-    # 4) Normalisations [-1,1] (simples et robustes)
-    # RSI: centré sur 50 (survente<40, surachat>60)
-    rsi_s = np.clip(1 - 2 * abs((rsi if not np.isnan(rsi) else 50) - 50) / 50, -1, 1)
-    # MACD hist: scale par robustesse (écart-type) si possible
-    try:
-        macd_std = float(k["MACD_hist"].dropna().tail(100).std(ddof=0))
-    except Exception:
-        macd_std = np.nan
-    macd_s = np.tanh((macd_h / macd_std)) if (not np.isnan(macd_h) and macd_std and macd_std > 0) else 0.0
-    # Prix vs SMA50
+    close = float(df["Close"].dropna().iloc[-1]) if "Close" in df.columns and df["Close"].notna().any() else np.nan
+    above50 = int(k["close_above_sma50"].dropna().iloc[-1]) if "close_above_sma50" in k.columns and k["close_above_sma50"].notna().any() else 0
+
+    # Normalisations [-1,1]
+    rsi_s = np.clip(1 - 2 * abs(rsi - 50) / 50, -1, 1)
+    macd_std = k["MACD_hist"].dropna().tail(100).std(ddof=0) if "MACD_hist" in k.columns else 0.0
+    macd_s = np.tanh(macd_h / macd_std) if macd_std and macd_std > 0 else 0.0
     sma_ct = np.tanh(((close - sma50) / sma50) * 5) if (not np.isnan(close) and not np.isnan(sma50) and sma50) else 0.0
-    # SMA50 vs SMA200
     sma_lt = np.tanh(((sma50 - sma200) / sma200) * 3) if (not np.isnan(sma50) and not np.isnan(sma200) and sma200) else 0.0
-    # Distance au plus haut 52s (plus proche du high → plutôt momentum)
-    hh52_s = -np.tanh((1 - (1 + (pct_hh52 if not np.isnan(pct_hh52) else -0.2))) * 2)
-    # Volume Z
-    vol_s = np.tanh((volz20 if not np.isnan(volz20) else 0) / 3)
-    # Bonus discret si au-dessus de SMA50
+    hh52_s = -np.tanh((1 - (1 + pct_hh52)) * 2)  # ≈ -tanh(-pct_hh52*2)
+    vol_s = np.tanh(volz20 / 3)
     bonus50 = 0.15 if above50 == 1 else -0.05
 
-    # 5) Pondérations (statiques, simples)
-    weights = {
-        "rsi": 0.15,
-        "macd": 0.25,
-        "sma_ct": 0.20,
-        "sma_lt": 0.20,
-        "hh52": 0.10,
-        "vol": 0.10,
-    }
-    parts = {
-        "rsi": rsi_s,
-        "macd": macd_s,
-        "sma_ct": sma_ct,
-        "sma_lt": sma_lt,
-        "hh52": hh52_s,
-        "vol": vol_s,
-    }
+    weights = {"rsi": 0.15, "macd": 0.25, "sma_ct": 0.20, "sma_lt": 0.20, "hh52": 0.10, "vol": 0.10}
+    parts = {"rsi": rsi_s, "macd": macd_s, "sma_ct": sma_ct, "sma_lt": sma_lt, "hh52": hh52_s, "vol": vol_s}
 
-    # Renormaliser les poids si certains sous-scores sont NaN
     valid = {k_: v for k_, v in parts.items() if not np.isnan(v)}
-    if not valid:
-        score_norm = 0.0
-    else:
+    if valid:
         wsum = sum(weights[k_] for k_ in valid.keys())
         score_norm = sum(parts[k_] * (weights[k_] / wsum) for k_ in valid.keys())
+    else:
+        score_norm = 0.0
 
     score_norm += bonus50
-
-    # 6) Échelle finale [-5, 5]
     score = float(np.clip(score_norm * 5.0, -5.0, 5.0))
-    # 7) Signal
+
     if score >= 3.0:
         action = "BUY"
     elif score >= 1.5:
