@@ -828,32 +828,42 @@ with tab_full:
     st.title("Scanner complet — Univers entier")
     score_label = get_score_label()
 
-    with st.form("full_scan_form", clear_on_submit=False):
-        colf1, colf2, colf3, colf4 = st.columns([1, 2, 1, 1])
+    universe = load_universe_df()
+    base = universe.loc[universe["ticker"].astype(str).str.len() > 0].copy()
 
-        uni = load_universe()
-        base = uni.loc[uni["ticker"].astype(str).str.len() > 0].copy()
+    markets_available = sorted(base["market"].dropna().astype(str).unique().tolist())
+    markets_available.insert(0, "Tous")
 
-        markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
-        sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
-        query = colf2.text_input("Rechercher (ticker ou nom)", "")
-        limit = colf3.number_input("Limite", min_value=10, max_value=2000, value=500, step=10)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        market_filter = st.selectbox("Marché", markets_available, index=0)
+    with col2:
+        search_term = st.text_input("Recherche (nom, ticker, ISIN)", "")
+    with col3:
+        limit = st.number_input("Limite de tickers", 10, 1000, 500, step=50)
 
-        do_scan = colf4.form_submit_button("🚀 Lancer le scan complet")
+    do_scan = st.button("🚀 Lancer le scan complet")
 
-    dfv = base.copy()
-    if sel_markets and "(Tous)" not in sel_markets:
-        dfv = dfv[dfv["market"].isin(sel_markets)]
-    if query.strip():
-        q = query.strip().lower()
-        dfv = dfv[
-            dfv["ticker"].str.lower().str.contains(q)
-            | dfv["name"].str.lower().str.contains(q)
+    df = base.copy()
+
+    if market_filter != "Tous":
+        df = df[df["market"].astype(str).str.lower() == market_filter.lower()]
+
+    if search_term.strip():
+        term = search_term.strip().lower()
+        df = df[
+            df["name"].astype(str).str.lower().str.contains(term)
+            | df["ticker"].astype(str).str.lower().str.contains(term)
+            | df["isin"].astype(str).str.lower().str.contains(term)
         ]
-    tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
+
+    df = df.head(int(limit))
+
+    tickers = df["ticker"].dropna().astype(str).str.strip().tolist()
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    want_markets = sel_markets[:]
+    query = search_term
+    want_markets = ["(Tous)"] if market_filter == "Tous" else [market_filter]
     cached_df, cached_meta = load_full_scan_cache()
     used_cache = False
     if (
