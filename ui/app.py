@@ -11,16 +11,19 @@ import pandas as pd
 import streamlit as st
 import requests
 import traceback
-from importlib import reload
 
 # --- rendre importable le package "api" depuis /ui ---
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-import api.core.scoring as scoring  # noqa: E402
+DEBUG = bool(os.getenv("DEBUG", "0") == "1")
+if DEBUG:
+    from importlib import reload
+    import api.core.scoring as scoring  # noqa: E402
 
-reload(scoring)  # force le rechargement du module
+    reload(scoring)
+
 from api.core.scoring import (  # noqa: E402
     compute_kpis,
     compute_kpis_investor,
@@ -81,12 +84,6 @@ def get_universe_normalized():
         df["market"] = ""
     df["market_norm"] = df["market"].apply(_norm_market)
     return df
-
-
-def _scan_cache_key(profile: str, markets_key: str, term: str, limit: int) -> str:
-    return f"{profile}|{markets_key}|{term}|{int(limit)}"
-
-
 def _now_iso():
     import datetime as _dt
 
@@ -426,6 +423,74 @@ def safe_yf_download(tkr: str, period="9mo", interval="1d") -> pd.DataFrame:
         pass
 
     return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def score_ticker_cached(tkr: str, profile: str) -> dict:
+    period = "36mo" if profile == "Investisseur" else "9mo"
+    df = safe_yf_download(tkr, period=period, interval="1d")
+    if df is None or df.empty or "Close" not in df.columns:
+        return {"Ticker": tkr, "error": "no_data"}
+    df = df.dropna(subset=["Close"]).copy()
+    if df.empty:
+        return {"Ticker": tkr, "error": "no_close"}
+
+    if profile == "Investisseur":
+        score, action = compute_score_investor(df)
+        kpi = compute_kpis_investor(df)
+        rsi_val = macd_h = volz20 = None
+        pct_hh = (
+            float(kpi["%toHH52w"].dropna().iloc[-1])
+            if isinstance(kpi, pd.DataFrame) and "%toHH52w" in kpi.columns and not kpi["%toHH52w"].dropna().empty
+            else None
+        )
+    else:
+        score, action = compute_score(df)
+        kpi = compute_kpis(df)
+        rsi_val = (
+            float(kpi["RSI"].dropna().iloc[-1])
+            if isinstance(kpi, pd.DataFrame) and "RSI" in kpi.columns and not kpi["RSI"].dropna().empty
+            else None
+        )
+        macd_h = (
+            float(kpi["MACD_hist"].dropna().iloc[-1])
+            if isinstance(kpi, pd.DataFrame) and "MACD_hist" in kpi.columns and not kpi["MACD_hist"].dropna().empty
+            else None
+        )
+        pct_hh = (
+            float(kpi["%toHH52"].dropna().iloc[-1])
+            if isinstance(kpi, pd.DataFrame) and "%toHH52" in kpi.columns and not kpi["%toHH52"].dropna().empty
+            else None
+        )
+        volz20 = (
+            float(kpi["VolZ20"].dropna().iloc[-1])
+            if isinstance(kpi, pd.DataFrame) and "VolZ20" in kpi.columns and not kpi["VolZ20"].dropna().empty
+            else None
+        )
+
+    uni = get_universe_normalized()
+    name = market = ""
+    try:
+        sel = uni.loc[
+            uni["ticker"].astype(str).str.upper() == tkr, ["name", "market_norm"]
+        ]
+        if not sel.empty:
+            name = str(sel["name"].iloc[0])
+            market = str(sel["market_norm"].iloc[0])
+    except Exception:
+        pass
+
+    return {
+        "Ticker": tkr,
+        "Name": name,
+        "Market": market,
+        "Signal": action or "",
+        "Score": float(score) if score is not None else None,
+        "RSI": rsi_val,
+        "MACD_hist": macd_h,
+        "%toHH52": pct_hh,
+        "VolZ20": volz20,
+    }
 
 
 def score_one(ticker: str, profile: str | None = None, *, debug: bool = False):
@@ -912,129 +977,92 @@ with tab_full:
     score_label = get_score_label()
     profile_current = get_analysis_profile()
 
-    # ====== SCANNER COMPLET ======
-
-    # ====== Filtres Marchés simplifiés (Excel-like) ======
     uni = get_universe_normalized()
-
-    # Liste restreinte aux marchés principaux
     MARKETS_MAIN = ["US", "FR", "DE", "UK", "ETF"]
-
-    # Normalisation des marchés
     uni["market_norm"] = uni["market"].apply(_norm_market)
     markets_all = [m for m in MARKETS_MAIN if m in uni["market_norm"].unique().tolist()]
 
-    # UI layout
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        limit = st.number_input("Limite de tickers", min_value=10, max_value=2000, value=500, step=50)
-    with c2:
-        st.write("")  # espacement
-        col_btn1, col_btn2 = st.columns([1, 1])
-        with col_btn1:
-            btn_select_all = st.button("Tout cocher")
-        with col_btn2:
-            btn_clear_all = st.button("Tout décocher")
-
-    st.write("**Marchés suivis** — coche/décoche pour filtrer :")
-
-    # Persistance de l’état dans la session
     if "market_checks" not in st.session_state:
         st.session_state.market_checks = {m: True for m in markets_all}
 
-    # Actions rapides
-    if btn_select_all:
-        for m in markets_all:
-            st.session_state.market_checks[m] = True
-    if btn_clear_all:
-        for m in markets_all:
-            st.session_state.market_checks[m] = False
-
-    # Affichage cases à cocher
-    cols = st.columns(len(markets_all))
-    for i, m in enumerate(markets_all):
-        with cols[i % len(cols)]:
-            st.session_state.market_checks[m] = st.checkbox(
-                m, value=st.session_state.market_checks.get(m, True), key=f"mkt_{m}"
+    with st.form(key="full_scan_form", clear_on_submit=False):
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            limit = st.number_input(
+                "Limite de tickers", min_value=10, max_value=2000, value=500, step=50
             )
+        with c2:
+            colA, colB = st.columns(2)
+            with colA:
+                if st.form_submit_button("Tout cocher"):
+                    for m in markets_all:
+                        st.session_state.market_checks[m] = True
+            with colB:
+                if st.form_submit_button("Tout décocher"):
+                    for m in markets_all:
+                        st.session_state.market_checks[m] = False
 
-    # Sélection effective
+        st.write("**Marchés suivis** — coche/décoche pour filtrer :")
+        cols = st.columns(len(markets_all) or 1)
+        for i, m in enumerate(markets_all):
+            with cols[i % len(cols)]:
+                st.session_state.market_checks[m] = st.checkbox(
+                    m, value=st.session_state.market_checks.get(m, True), key=f"mkt_{m}"
+                )
+
+        c3, c4 = st.columns([1, 1])
+        with c3:
+            do_scan = st.form_submit_button("🚀 Lancer le scan complet")
+        with c4:
+            refresh = st.form_submit_button("🔄 Rafraîchir (ignorer le cache)")
+
     selected_markets = [m for m, on in st.session_state.market_checks.items() if on]
     all_selected = len(selected_markets) == len(markets_all)
 
-    # Application filtres
     df_filtered = uni.copy()
     if not all_selected:
         df_filtered = df_filtered[df_filtered["market_norm"].isin(selected_markets)]
-
-    # Limite
     df_filtered = df_filtered.head(int(limit)).reset_index(drop=True)
 
-    # Résumé
-    tot_univ = len(uni)
-    tot_sel = len(df_filtered)
-    by_mkt = (
-        df_filtered["market_norm"].value_counts().sort_index().to_dict()
-        if not df_filtered.empty else {}
-    )
-    st.caption(
-        f"🔎 {tot_sel} valeurs filtrées sur {tot_univ} · Marchés cochés : "
-        f"{', '.join(selected_markets) if selected_markets else '—'} · Par marché : "
-        f"{by_mkt if by_mkt else '—'}"
-    )
-
-    refresh = st.button("🔄 Rafraîchir les données")
-
-    # --- Cache des scans (clé = profil + marchés + recherche + limite)
+    profile = profile_current
     mk_key = "ALL" if all_selected else ",".join(sorted(selected_markets))
-    q_key = ""
-    cache_key = _scan_cache_key(profile_current, mk_key, q_key, int(limit))
+    cache_key = f"{profile}|{mk_key}|{int(limit)}"
 
     if "full_scan_cache" not in st.session_state:
         st.session_state["full_scan_cache"] = {}
 
     if refresh:
         st.session_state["full_scan_cache"].pop(cache_key, None)
+        try:
+            score_ticker_cached.clear()
+            safe_yf_download.clear()
+        except Exception:
+            pass
 
-    use_cache = (not refresh) and (cache_key in st.session_state["full_scan_cache"])
     out = None
-
-    if use_cache:
-        cached = st.session_state["full_scan_cache"][cache_key]
-        out = cached.get("df")
-        st.caption(
-            f"🗂️ Cache: scan du {cached.get('ts')} (profil={profile_current}, marchés={mk_key}, limite={limit})"
-        )
-    else:
-        # Lancer le scan parallèle UNIQUEMENT sur la sélection filtrée
-        ticker_list = (
-            df_filtered["ticker"].astype(str).str.upper().dropna().unique().tolist()
-        )
+    if do_scan or refresh:
+        ticker_list = df_filtered["ticker"].astype(str).str.upper().dropna().unique().tolist()
         if not ticker_list:
             st.info("Aucune valeur à scanner avec ces filtres.")
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
+            max_workers = min(8, (os.cpu_count() or 4) * 2)
             rows, failures = [], []
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                futs = {
-                    ex.submit(score_one, t, profile_current, debug=DEBUG_MODE): t
-                    for t in ticker_list
-                }
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {ex.submit(score_ticker_cached, t, profile): t for t in ticker_list}
                 for fut in as_completed(futs):
                     res = fut.result()
                     if isinstance(res, dict) and res.get("error"):
                         failures.append(res)
                     else:
                         rows.append(res)
-
             if rows:
                 out = (
                     pd.DataFrame(rows)
                     .sort_values(by=["Score", "Ticker"], ascending=[False, True])
                     .reset_index(drop=True)
                 )
-                # Ordre colonnes (sans "Profile" ni "Action")
                 cols = [
                     "Ticker",
                     "Name",
@@ -1047,7 +1075,6 @@ with tab_full:
                     "VolZ20",
                 ]
                 out = out[[c for c in cols if c in out.columns]]
-                # Sauvegarde cache
                 st.session_state["full_scan_cache"][cache_key] = {
                     "df": out,
                     "ts": _now_iso(),
@@ -1055,14 +1082,13 @@ with tab_full:
             else:
                 st.info("Aucun résultat exploitable pour ces filtres.")
 
-            # Diagnostics
             if failures:
                 df_fail = pd.DataFrame(failures)
                 MAP = {
-                    "format_ticker_invalide": "Ticker invalide",
-                    "ticker_hors_univers": "Hors univers",
                     "no_data": "Pas de données Yahoo",
                     "no_close": "Pas de clôtures",
+                    "format_ticker_invalide": "Ticker invalide",
+                    "ticker_hors_univers": "Hors univers",
                 }
 
                 def _reason(e):
@@ -1072,16 +1098,17 @@ with tab_full:
 
                 df_fail["raison"] = df_fail["error"].apply(_reason)
                 with st.expander("Diagnostics (échecs)"):
-                    st.dataframe(
-                        df_fail[["Ticker", "raison"]], use_container_width=True
-                    )
-                    if DEBUG_MODE:
-                        for f in failures:
-                            if f.get("debug"):
-                                st.caption(f"Debug {f.get('Ticker', '')}:")
-                                st.json(f["debug"])
+                    st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+    elif cache_key in st.session_state["full_scan_cache"]:
+        cached = st.session_state["full_scan_cache"][cache_key]
+        out = cached.get("df")
+        ts = cached.get("ts")
+        st.caption(
+            f"🗂️ Affichage du scan en cache du {ts} (profil={profile}, marchés={mk_key}, limite={limit})"
+        )
+    else:
+        st.info("Aucun scan encore effectué. Ajuste les filtres et clique “🚀 Lancer le scan complet”.")
 
-    # Affichage résultats
     if isinstance(out, pd.DataFrame) and not out.empty:
         st.subheader("Résultats du scan")
         display_out = rename_score_for_display(out)
@@ -1100,14 +1127,25 @@ with tab_full:
         )
         display_cols = [c for c in display_cols if c in display_out.columns]
         st.dataframe(display_out[display_cols], use_container_width=True)
-        # Export CSV
-        csv = out.to_csv(index=False).encode("utf-8")
         st.download_button(
             "💾 Export CSV",
-            data=csv,
+            data=out.to_csv(index=False).encode("utf-8"),
             file_name="full_scan_results.csv",
             mime="text/csv",
         )
+
+    tot_univ = len(uni)
+    tot_sel = len(df_filtered)
+    by_mkt = (
+        df_filtered["market_norm"].value_counts().sort_index().to_dict()
+        if not df_filtered.empty
+        else {}
+    )
+    st.caption(
+        f"🔎 {tot_sel} valeurs filtrées sur {tot_univ} · Marchés cochés: "
+        f"{', '.join(selected_markets) if selected_markets else '—'} · Par marché: "
+        f"{by_mkt if by_mkt else '—'}"
+    )
 
     st.divider()
 
