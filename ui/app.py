@@ -282,27 +282,18 @@ def get_name_for_ticker(tkr: str) -> str:
 
 # ========= Données marché + scoring =========
 def score_one(ticker: str):
-    """Thread-safe: ne modifie pas st.session_state et remonte trace en cas d'erreur."""
+    """Thread-safe: ne modifie pas st.session_state. Retourne un dict score ou {'error','trace'}."""
     tkr = _norm_ticker(ticker)
     ok, why = validate_ticker(tkr)
     if not ok:
         return {"Ticker": tkr, "error": why}
 
     try:
-        df = yf.download(
-            tkr,
-            period="9mo",
-            interval="1d",
-            group_by="column",
-            auto_adjust=False,
-            progress=False,
-        )
+        df = yf.download(tkr, period="9mo", interval="1d", group_by="column",
+                         auto_adjust=False, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
-            cols = [
-                c
-                for c in ["Open", "High", "Low", "Close", "Volume"]
-                if c in df.columns.get_level_values(0)
-            ]
+            cols = [c for c in ["Open","High","Low","Close","Volume"]
+                    if c in df.columns.get_level_values(0)]
             if cols:
                 df = df[cols]
                 df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
@@ -319,7 +310,7 @@ def score_one(ticker: str):
         if isinstance(cs, (list, tuple)) and len(cs) >= 2:
             score, action = cs[0], cs[1]
         else:
-            score, action = cs, None
+            score, action = cs
 
         uni = load_universe_df()
         name = ""
@@ -330,37 +321,22 @@ def score_one(ticker: str):
         except Exception:
             pass
 
-        action_val = None
-        if action is not None:
-            try:
-                action_val = str(action)
-            except Exception:
-                action_val = None
-
         return {
             "Ticker": tkr,
             "Name": name,
             "Score": float(score) if score is not None else None,
-            "Action": action_val,
-            "RSI": float(kpis["RSI"].iloc[-1])
-            if isinstance(kpis, pd.DataFrame) and "RSI" in kpis
-            else None,
-            "MACD_hist": float(kpis["MACD_hist"].iloc[-1])
-            if isinstance(kpis, pd.DataFrame) and "MACD_hist" in kpis
-            else None,
-            "%toHH52": float(kpis["%toHH52"].iloc[-1])
-            if isinstance(kpis, pd.DataFrame) and "%toHH52" in kpis
-            else None,
-            "VolZ20": float(kpis["VolZ20"].iloc[-1])
-            if isinstance(kpis, pd.DataFrame) and "VolZ20" in kpis
-            else None,
+            "Action": action,
+            "RSI": float(kpis["RSI"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "RSI" in kpis else None,
+            "MACD_hist": float(kpis["MACD_hist"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "MACD_hist" in kpis else None,
+            "%toHH52": float(kpis["%toHH52"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "%toHH52" in kpis else None,
+            "VolZ20": float(kpis["VolZ20"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "VolZ20" in kpis else None,
         }
 
     except Exception as e:
         return {
             "Ticker": tkr,
             "error": f"exception:{type(e).__name__}:{e}",
-            "trace": traceback.format_exc(),
+            "trace": traceback.format_exc()
         }
 
 # ========= Recherche dans l'univers (nom / isin / ticker) =========
@@ -505,7 +481,6 @@ with tab_scan:
     if run:
         rows = []
         failures = []
-        last_trace = None
         prog = st.progress(0)
         tickers = [
             _norm_ticker(t)
@@ -520,10 +495,13 @@ with tab_scan:
                 failures.append({"Ticker": _norm_ticker(tkr), "error": "invalid_return"})
                 continue
             if res.get("error"):
-                failures.append({"Ticker": res.get("Ticker", _norm_ticker(tkr)), "error": res["error"]})
-                trace = res.get("trace")
-                if trace:
-                    last_trace = trace
+                failures.append(
+                    {
+                        "Ticker": res.get("Ticker", _norm_ticker(tkr)),
+                        "error": res["error"],
+                        "trace": res.get("trace"),
+                    }
+                )
             else:
                 rows.append(res)
         if rows:
@@ -562,10 +540,9 @@ with tab_scan:
 
             MAP = {
                 "format_ticker_invalide": "Ticker invalide (format Yahoo).",
-                "ticker_hors_univers": "Ticker hors de l'univers suivi (ajoute-le ou corrige le suffixe .PA/.DE/.L...).",
-                "no_data": "Aucune donnée renvoyée par Yahoo (symbole invalide ou indisponible).",
+                "ticker_hors_univers": "Ticker hors de l'univers suivi.",
+                "no_data": "Aucune donnée renvoyée par Yahoo.",
                 "no_close": "Pas de clôtures exploitables.",
-                "invalid_return": "Retour invalide du scoreur.",
             }
 
             def _reason(e):
@@ -574,8 +551,13 @@ with tab_scan:
                 return MAP.get(e, str(e))
 
             df_fail["raison"] = df_fail["error"].apply(_reason)
-            with st.expander("Diagnostics watchlist (échecs)"):
+            with st.expander("Diagnostics (échecs)"):
                 st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+                # Stacktrace éventuelle du dernier échec
+                last_trace = None
+                for f in failures:
+                    if "trace" in f and f["trace"]:
+                        last_trace = f["trace"]
                 if last_trace:
                     st.code(last_trace, language="python")
 
@@ -714,7 +696,6 @@ with tab_full:
         start = time.time()
         rows = []
         failures = []
-        last_trace = None
         done = 0
         prog = st.progress(0)
 
@@ -732,10 +713,13 @@ with tab_full:
                     failures.append({"Ticker": norm_tkr, "error": "invalid_return"})
                     continue
                 if res.get("error"):
-                    failures.append({"Ticker": res.get("Ticker", norm_tkr), "error": res["error"]})
-                    trace = res.get("trace")
-                    if trace:
-                        last_trace = trace
+                    failures.append(
+                        {
+                            "Ticker": res.get("Ticker", norm_tkr),
+                            "error": res["error"],
+                            "trace": res.get("trace"),
+                        }
+                    )
                 else:
                     rows.append(res)
                 done += 1
@@ -842,10 +826,9 @@ with tab_full:
 
             MAP = {
                 "format_ticker_invalide": "Ticker invalide (format Yahoo).",
-                "ticker_hors_univers": "Ticker hors de l'univers suivi (ajoute-le ou corrige le suffixe .PA/.DE/.L...).",
-                "no_data": "Aucune donnée renvoyée par Yahoo (symbole invalide ou indisponible).",
+                "ticker_hors_univers": "Ticker hors de l'univers suivi.",
+                "no_data": "Aucune donnée renvoyée par Yahoo.",
                 "no_close": "Pas de clôtures exploitables.",
-                "invalid_return": "Retour invalide du scoreur.",
             }
 
             def _reason(e):
@@ -854,8 +837,13 @@ with tab_full:
                 return MAP.get(e, str(e))
 
             df_fail["raison"] = df_fail["error"].apply(_reason)
-            with st.expander("Diagnostics scan complet (échecs)"):
+            with st.expander("Diagnostics (échecs)"):
                 st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+                # Stacktrace éventuelle du dernier échec
+                last_trace = None
+                for f in failures:
+                    if "trace" in f and f["trace"]:
+                        last_trace = f["trace"]
                 if last_trace:
                     st.code(last_trace, language="python")
     elif used_cache and cached_df is not None:
@@ -926,7 +914,6 @@ with tab_full:
     else:
         rows_wl = []
         failures = []
-        last_trace = None
         for tkr in full_wl["ticker"].dropna().astype(str).str.strip().unique().tolist():
             norm_tkr = _norm_ticker(tkr)
             if not norm_tkr:
@@ -937,10 +924,13 @@ with tab_full:
                 failures.append({"Ticker": norm_tkr, "error": "invalid_return"})
                 continue
             if res.get("error"):
-                failures.append({"Ticker": res.get("Ticker", norm_tkr), "error": res["error"]})
-                trace = res.get("trace")
-                if trace:
-                    last_trace = trace
+                failures.append(
+                    {
+                        "Ticker": res.get("Ticker", norm_tkr),
+                        "error": res["error"],
+                        "trace": res.get("trace"),
+                    }
+                )
             else:
                 rows_wl.append(res)
 
@@ -997,10 +987,9 @@ with tab_full:
 
             MAP = {
                 "format_ticker_invalide": "Ticker invalide (format Yahoo).",
-                "ticker_hors_univers": "Ticker hors de l'univers suivi (ajoute-le ou corrige le suffixe .PA/.DE/.L...).",
-                "no_data": "Aucune donnée renvoyée par Yahoo (symbole invalide ou indisponible).",
+                "ticker_hors_univers": "Ticker hors de l'univers suivi.",
+                "no_data": "Aucune donnée renvoyée par Yahoo.",
                 "no_close": "Pas de clôtures exploitables.",
-                "invalid_return": "Retour invalide du scoreur.",
             }
 
             def _reason(e):
@@ -1009,8 +998,13 @@ with tab_full:
                 return MAP.get(e, str(e))
 
             df_fail["raison"] = df_fail["error"].apply(_reason)
-            with st.expander("Diagnostics watchlist (échecs)"):
+            with st.expander("Diagnostics (échecs)"):
                 st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
+                # Stacktrace éventuelle du dernier échec
+                last_trace = None
+                for f in failures:
+                    if "trace" in f and f["trace"]:
+                        last_trace = f["trace"]
                 if last_trace:
                     st.code(last_trace, language="python")
 # --------- Onglet 💼 POSITIONS ---------
