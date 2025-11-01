@@ -195,6 +195,7 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
             "MACD_hist": macd_hist,
             "SMA50": sma50,
             "SMA200": sma200,
+            "close_above_sma50": (close > sma50).astype(int),
             "BBP": bbp,
             "VolZ20": volz20,
             "pct_to_HH52": pct_to_hh52,
@@ -337,126 +338,103 @@ def _aggregate_score(subscores: Dict[str, float], weights: Dict[str, float]) -> 
     return score_norm, normalized
 
 
-def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
-    """Compute the composite score, signal, and diagnostics for a history."""
+def compute_score(df: pd.DataFrame):
+    """
+    Retourne (score, action).
+    Utilise uniquement l'accès par crochets et garantit close_above_sma50.
+    """
 
-    kpis = compute_kpis(df)
-    if kpis.empty:
-        neutral_details = {
-            "RSI": np.nan,
-            "MACD": np.nan,
-            "ADX": np.nan,
-            "SMA_CT": np.nan,
-            "SMA_LT": np.nan,
-            "HH52": np.nan,
-            "VOLZ": np.nan,
-            "BBP": np.nan,
-            "MR": np.nan,
-            "weights": {},
-            "rv": np.nan,
-            "p_up": 0.5,
-            "score_norm": 0.0,
-            "score_smooth": 0.0,
-        }
-        return 0.0, "HOLD", neutral_details
+    # 1) KPIs
+    k = compute_kpis(df)  # Doit au moins contenir: RSI, MACD_hist, SMA50, SMA200, %toHH52, VolZ20 (si dispo)
 
-    if "Close" in kpis.columns:
-        close_series = pd.to_numeric(kpis["Close"], errors="coerce")
-    elif df is not None and "Close" in df.columns:
-        close_series = pd.to_numeric(df["Close"], errors="coerce")
-        kpis["Close"] = close_series
-    else:
-        close_series = pd.Series(index=kpis.index, dtype="float64")
+    # 2) Garanties minimales de colonnes
+    # SMA50 si absent
+    if "SMA50" not in k.columns:
+        k["SMA50"] = df["Close"].rolling(50, min_periods=25).mean()
 
-    if "SMA50" not in kpis.columns:
-        kpis["SMA50"] = close_series.rolling(50, min_periods=25).mean()
+    # close_above_sma50 si absent
+    if "close_above_sma50" not in k.columns:
+        k["close_above_sma50"] = (df["Close"] > k["SMA50"]).astype(int)
 
-    if "close_above_sma50" not in kpis.columns:
-        kpis["close_above_sma50"] = (close_series > kpis["SMA50"]).astype(int)
+    # 3) Récup des dernières valeurs en sécurité
+    def last(col, default=np.nan):
+        if col in k.columns and k[col].notna().any():
+            try:
+                return float(k[col].dropna().iloc[-1])
+            except Exception:
+                return default
+        return default
 
-    ret = close_series.pct_change()
-    rv_series = ret.rolling(20, min_periods=5).std(ddof=0) * np.sqrt(252.0)
+    rsi = last("RSI")
+    macd_h = last("MACD_hist")
+    sma50 = last("SMA50")
+    sma200 = last("SMA200")
+    pct_hh52 = last("%toHH52")
+    volz20 = last("VolZ20")
+    close = float(df["Close"].dropna().iloc[-1]) if "Close" in df.columns and df["Close"].notna().any() else np.nan
+    above50 = int(k["close_above_sma50"].dropna().iloc[-1]) if k["close_above_sma50"].notna().any() else 0
 
-    score_history: list[float] = []
-    for idx, row in kpis.iterrows():
-        rv_val = rv_series.loc[idx] if idx in rv_series.index else np.nan
-        weights, _, _ = _dynamic_weights(rv_val)
-        subs = _compute_subscores(row)
-        score_norm_row, _ = _aggregate_score(subs, weights)
-        score_history.append(score_norm_row)
-
-    score_series = pd.Series(score_history, index=kpis.index)
-    score_series = score_series.replace([np.inf, -np.inf], np.nan)
-    score_series = score_series.dropna()
-
-    if score_series.empty:
-        score_norm = 0.0
-        score_smooth = 0.0
-    else:
-        score_norm = float(score_series.iloc[-1])
-        if score_series.size >= 3:
-            score_smooth = float(score_series.ewm(span=3, adjust=False).mean().iloc[-1])
-        else:
-            score_smooth = score_norm
-
-    score_final = float(np.clip(score_smooth * 5.0, -5.0, 5.0))
-    score_final = round(score_final, 2)
-
-    rv_series_clean = rv_series.dropna()
-    rv_latest = float(rv_series_clean.iloc[-1]) if not rv_series_clean.empty else np.nan
-    weights_latest, wmom, wmr = _dynamic_weights(rv_latest)
-    subscores_latest = _compute_subscores(kpis.iloc[-1])
-    score_norm_latest, normalized_weights = _aggregate_score(subscores_latest, weights_latest)
-
-    if np.isnan(score_norm_latest):
-        score_norm_latest = 0.0
-
-    if np.isnan(score_smooth):
-        score_smooth = score_norm_latest
-
+    # 4) Normalisations [-1,1] (simples et robustes)
+    # RSI: centré sur 50 (survente<40, surachat>60)
+    rsi_s = np.clip(1 - 2 * abs((rsi if not np.isnan(rsi) else 50) - 50) / 50, -1, 1)
+    # MACD hist: scale par robustesse (écart-type) si possible
     try:
-        p_up = float(1.0 / (1.0 + np.exp(-score_smooth)))
-    except OverflowError:
-        p_up = float(score_smooth > 0.0)
+        macd_std = float(k["MACD_hist"].dropna().tail(100).std(ddof=0))
+    except Exception:
+        macd_std = np.nan
+    macd_s = np.tanh((macd_h / macd_std)) if (not np.isnan(macd_h) and macd_std and macd_std > 0) else 0.0
+    # Prix vs SMA50
+    sma_ct = np.tanh(((close - sma50) / sma50) * 5) if (not np.isnan(close) and not np.isnan(sma50) and sma50) else 0.0
+    # SMA50 vs SMA200
+    sma_lt = np.tanh(((sma50 - sma200) / sma200) * 3) if (not np.isnan(sma50) and not np.isnan(sma200) and sma200) else 0.0
+    # Distance au plus haut 52s (plus proche du high → plutôt momentum)
+    hh52_s = -np.tanh((1 - (1 + (pct_hh52 if not np.isnan(pct_hh52) else -0.2))) * 2)
+    # Volume Z
+    vol_s = np.tanh((volz20 if not np.isnan(volz20) else 0) / 3)
+    # Bonus discret si au-dessus de SMA50
+    bonus50 = 0.15 if above50 == 1 else -0.05
 
-    action: str
-    if score_final >= 3.0:
-        action = "BUY"
-    elif score_final >= 1.5:
-        action = "WATCH"
-    elif score_final > -1.5:
-        action = "HOLD"
-    elif score_final > -3.0:
-        action = "REDUCE"
-    else:
-        action = "SELL"
-
-    weights_details = dict(normalized_weights)
-    weights_details["wmom"] = wmom
-    weights_details["wmr"] = wmr
-
-    if "close_above_sma50" in kpis.columns and kpis["close_above_sma50"].notna().any():
-        close_above_latest = int(kpis["close_above_sma50"].dropna().iloc[-1])
-    else:
-        close_above_latest = np.nan
-
-    details = {
-        "RSI": subscores_latest.get("RSI"),
-        "MACD": subscores_latest.get("MACD"),
-        "ADX": subscores_latest.get("ADX"),
-        "SMA_CT": subscores_latest.get("SMA_CT"),
-        "SMA_LT": subscores_latest.get("SMA_LT"),
-        "HH52": subscores_latest.get("HH52"),
-        "VOLZ": subscores_latest.get("VOLZ"),
-        "BBP": subscores_latest.get("BBP"),
-        "MR": subscores_latest.get("MR"),
-        "close_above_sma50": close_above_latest,
-        "weights": weights_details,
-        "rv": rv_latest,
-        "p_up": p_up,
-        "score_norm": score_norm_latest,
-        "score_smooth": score_smooth,
+    # 5) Pondérations (statiques, simples)
+    weights = {
+        "rsi": 0.15,
+        "macd": 0.25,
+        "sma_ct": 0.20,
+        "sma_lt": 0.20,
+        "hh52": 0.10,
+        "vol": 0.10,
+    }
+    parts = {
+        "rsi": rsi_s,
+        "macd": macd_s,
+        "sma_ct": sma_ct,
+        "sma_lt": sma_lt,
+        "hh52": hh52_s,
+        "vol": vol_s,
     }
 
-    return score_final, action, details
+    # Renormaliser les poids si certains sous-scores sont NaN
+    valid = {k_: v for k_, v in parts.items() if not np.isnan(v)}
+    if not valid:
+        score_norm = 0.0
+    else:
+        wsum = sum(weights[k_] for k_ in valid.keys())
+        score_norm = sum(parts[k_] * (weights[k_] / wsum) for k_ in valid.keys())
+
+    score_norm += bonus50
+
+    # 6) Échelle finale [-5, 5]
+    score = float(np.clip(score_norm * 5.0, -5.0, 5.0))
+    # 7) Signal
+    if score >= 3.0:
+        action = "BUY"
+    elif score >= 1.5:
+        action = "WATCH"
+    elif score <= -3.0:
+        action = "SELL"
+    elif score <= -1.5:
+        action = "REDUCE"
+    else:
+        action = "HOLD"
+
+    return score, action
 
