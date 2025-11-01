@@ -1,15 +1,10 @@
 [theme]
 base = "light"
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f3f4f6"
-textColor = "#111827"
+primaryColor = "#16a34a"                 # vert (tailwind green-600)
+backgroundColor = "#ffffff"              # blanc
+secondaryBackgroundColor = "#f6f7f9"     # gris très léger pour les panneaux
+textColor = "#0f172a"                    # gris très foncé (lisible)
 font = "sans serif"
 
-[server]
-enableXsrfProtection = true
-enableCORS = false
-headless = true
-
-[browser]
-gatherUsageStats = false
+[client]
+toolbarMode = "minimal"                  # moins d’encombrement en haut
