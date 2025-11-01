@@ -913,72 +913,81 @@ with tab_full:
     profile_current = get_analysis_profile()
 
     # ====== SCANNER COMPLET ======
+
+    # ====== Filtres Marchés simplifiés (Excel-like) ======
     uni = get_universe_normalized()
 
-    # Liste de marchés disponibles (normalisés)
-    markets_all = sorted([m for m in uni["market_norm"].dropna().unique().tolist() if m])
-    if "ETF" not in markets_all:
-        markets_all.append("ETF")  # visible même si pas encore dans les données
+    # Liste restreinte aux marchés principaux
+    MARKETS_MAIN = ["US", "FR", "DE", "UK", "ETF"]
 
-    # UI filtres
-    flt1, flt2, flt3, flt4 = st.columns([1, 2, 1, 1])
-    with flt1:
-        all_markets = st.checkbox(
-            "Tous les marchés",
-            value=True,
-            help="Décoche pour filtrer par un ou plusieurs marchés",
-        )
-    with flt2:
-        search_term = st.text_input("Recherche (nom, ticker, ISIN)", "")
-    with flt3:
-        limit = st.number_input(
-            "Limite de tickers", min_value=10, max_value=2000, value=500, step=50
-        )
-    with flt4:
-        refresh = st.button("🔄 Rafraîchir les données")
+    # Normalisation des marchés
+    uni["market_norm"] = uni["market"].apply(_norm_market)
+    markets_all = [m for m in MARKETS_MAIN if m in uni["market_norm"].unique().tolist()]
 
-    # Multi-sélection marchés quand 'Tous' est décoché
-    if not all_markets:
-        selected_markets = st.multiselect(
-            "Marchés", options=markets_all, default=markets_all
-        )
-    else:
-        selected_markets = markets_all[:]  # tous
+    # UI layout
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        limit = st.number_input("Limite de tickers", min_value=10, max_value=2000, value=500, step=50)
+    with c2:
+        st.write("")  # espacement
+        col_btn1, col_btn2 = st.columns([1, 1])
+        with col_btn1:
+            btn_select_all = st.button("Tout cocher")
+        with col_btn2:
+            btn_clear_all = st.button("Tout décocher")
 
-    # Appliquer filtres (AUCUN préfiltre implicite)
+    st.write("**Marchés suivis** — coche/décoche pour filtrer :")
+
+    # Persistance de l’état dans la session
+    if "market_checks" not in st.session_state:
+        st.session_state.market_checks = {m: True for m in markets_all}
+
+    # Actions rapides
+    if btn_select_all:
+        for m in markets_all:
+            st.session_state.market_checks[m] = True
+    if btn_clear_all:
+        for m in markets_all:
+            st.session_state.market_checks[m] = False
+
+    # Affichage cases à cocher
+    cols = st.columns(len(markets_all))
+    for i, m in enumerate(markets_all):
+        with cols[i % len(cols)]:
+            st.session_state.market_checks[m] = st.checkbox(
+                m, value=st.session_state.market_checks.get(m, True), key=f"mkt_{m}"
+            )
+
+    # Sélection effective
+    selected_markets = [m for m, on in st.session_state.market_checks.items() if on]
+    all_selected = len(selected_markets) == len(markets_all)
+
+    # Application filtres
     df_filtered = uni.copy()
-    if selected_markets and not all_markets:
+    if not all_selected:
         df_filtered = df_filtered[df_filtered["market_norm"].isin(selected_markets)]
 
-    if search_term.strip():
-        term = search_term.strip().lower()
-        for c in ("name", "ticker", "isin"):
-            if c not in df_filtered.columns:
-                df_filtered[c] = ""
-            df_filtered[c] = df_filtered[c].fillna("")
-        df_filtered = df_filtered[
-            df_filtered["name"].str.lower().str.contains(term)
-            | df_filtered["ticker"].str.lower().str.contains(term)
-            | df_filtered["isin"].str.lower().str.contains(term)
-        ]
-
+    # Limite
     df_filtered = df_filtered.head(int(limit)).reset_index(drop=True)
 
-    # Résumé visuel
+    # Résumé
     tot_univ = len(uni)
     tot_sel = len(df_filtered)
     by_mkt = (
         df_filtered["market_norm"].value_counts().sort_index().to_dict()
-        if not df_filtered.empty
-        else {}
+        if not df_filtered.empty else {}
     )
     st.caption(
-        f"🔎 {tot_sel} valeurs filtrées sur {tot_univ} · Par marché: {by_mkt if by_mkt else '—'}"
+        f"🔎 {tot_sel} valeurs filtrées sur {tot_univ} · Marchés cochés : "
+        f"{', '.join(selected_markets) if selected_markets else '—'} · Par marché : "
+        f"{by_mkt if by_mkt else '—'}"
     )
 
+    refresh = st.button("🔄 Rafraîchir les données")
+
     # --- Cache des scans (clé = profil + marchés + recherche + limite)
-    mk_key = "ALL" if all_markets else ",".join(sorted(selected_markets))
-    q_key = (search_term or "").strip().lower()
+    mk_key = "ALL" if all_selected else ",".join(sorted(selected_markets))
+    q_key = ""
     cache_key = _scan_cache_key(profile_current, mk_key, q_key, int(limit))
 
     if "full_scan_cache" not in st.session_state:
