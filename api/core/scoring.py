@@ -334,8 +334,21 @@ def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
         }
         return 0.0, "HOLD", neutral_details
 
-    close = pd.to_numeric(df.get("Close"), errors="coerce") if df is not None else pd.Series(dtype="float64")
-    ret = close.pct_change()
+    if "Close" in kpis.columns:
+        close_series = pd.to_numeric(kpis["Close"], errors="coerce")
+    elif df is not None and "Close" in df.columns:
+        close_series = pd.to_numeric(df["Close"], errors="coerce")
+        kpis["Close"] = close_series
+    else:
+        close_series = pd.Series(index=kpis.index, dtype="float64")
+
+    if "SMA50" not in kpis.columns:
+        kpis["SMA50"] = close_series.rolling(50, min_periods=25).mean()
+
+    if "close_above_sma50" not in kpis.columns:
+        kpis["close_above_sma50"] = (close_series > kpis["SMA50"]).astype(int)
+
+    ret = close_series.pct_change()
     rv_series = ret.rolling(20, min_periods=5).std(ddof=0) * np.sqrt(252.0)
 
     score_history: list[float] = []
@@ -395,6 +408,14 @@ def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
     weights_details["wmom"] = wmom
     weights_details["wmr"] = wmr
 
+    close_above_latest = (
+        kpis["close_above_sma50"].iloc[-1]
+        if "close_above_sma50" in kpis.columns and not kpis.empty
+        else np.nan
+    )
+    if pd.notna(close_above_latest):
+        close_above_latest = int(close_above_latest)
+
     details = {
         "RSI": subscores_latest.get("RSI"),
         "MACD": subscores_latest.get("MACD"),
@@ -405,6 +426,7 @@ def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
         "VOLZ": subscores_latest.get("VOLZ"),
         "BBP": subscores_latest.get("BBP"),
         "MR": subscores_latest.get("MR"),
+        "close_above_sma50": close_above_latest,
         "weights": weights_details,
         "rv": rv_latest,
         "p_up": p_up,
