@@ -14,9 +14,12 @@ import yfinance as yf
 import concurrent.futures as cf
 import requests
 import traceback
+from importlib import reload
 
 # --- rendre importable le package "api" depuis /ui ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import api.core.scoring as scoring
+reload(scoring)  # force le rechargement du module
 from api.core.scoring import compute_kpis, compute_score
 from api.core.isin_resolver import resolve_isin_to_ticker
 
@@ -65,6 +68,24 @@ st.sidebar.success(f"Connecté comme {USERNAME}")
 if st.sidebar.button("Se déconnecter"):
     st.session_state.clear()
     st.rerun()
+
+# ---------- Test rapide compute_score ----------
+with st.expander("Test compute_score"):
+    t = st.text_input("Ticker test", "AAPL")
+    if st.button("Tester"):
+        df = yf.download(
+            t,
+            period="9mo",
+            interval="1d",
+            group_by="column",
+            progress=False,
+        )
+        st.write("Colonnes df:", list(df.columns))
+        try:
+            st.write("Résultat:", compute_score(df))
+        except Exception as e:
+            st.error(repr(e))
+            st.code(traceback.format_exc())
 
 # ========= FICHIERS =========
 UNIVERSE_PATH = "data/watchlist.csv"

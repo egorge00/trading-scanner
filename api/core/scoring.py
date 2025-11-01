@@ -327,36 +327,38 @@ def _aggregate_score(subscores: Dict[str, float], weights: Dict[str, float]) -> 
 def compute_score(df: pd.DataFrame):
     """
     Retourne (score, action).
-    Accès colonnes via crochets; garantit close_above_sma50.
+    - N'utilise que l'accès par crochets.
+    - Ne dépend PAS d'une colonne 'close_above_sma50'.
     """
 
-    k = compute_kpis(df)
+    k = compute_kpis(df)  # KPIs robustes
 
-    # Garanties minimales
-    if "SMA50" not in k.columns:
-        k["SMA50"] = df["Close"].rolling(50, min_periods=25).mean()
-    if "close_above_sma50" not in k.columns:
-        k["close_above_sma50"] = (df["Close"] > k["SMA50"]).astype(int)
+    # Helpers
+    def last(series: pd.Series, default=np.nan) -> float:
+        if series is None:
+            return default
+        s = series.dropna()
+        if s.empty:
+            return default
+        try:
+            return float(s.iloc[-1])
+        except Exception:
+            return default
 
-    def last(col, default=np.nan):
-        if col in k.columns:
-            s = k[col].dropna()
-            if not s.empty:
-                try:
-                    return float(s.iloc[-1])
-                except Exception:
-                    return default
-        return default
+    # Garanties minimales SMA
+    sma50 = last(k["SMA50"]) if "SMA50" in k.columns else last(df["Close"].rolling(50, min_periods=25).mean())
+    sma200 = last(k["SMA200"]) if "SMA200" in k.columns else np.nan
 
-    rsi = last("RSI", 50.0)
-    macd_h = last("MACD_hist", 0.0)
-    sma50 = last("SMA50", np.nan)
-    sma200 = last("SMA200", np.nan)
-    pct_hh52 = last("%toHH52", -0.2)
-    volz20 = last("VolZ20", 0.0)
+    # Dernières valeurs
+    close = last(df["Close"])
+    rsi = last(k["RSI"]) if "RSI" in k.columns else 50.0
+    macd_h = last(k["MACD_hist"]) if "MACD_hist" in k.columns else 0.0
+    pct_hh52 = last(k["%toHH52"]) if "%toHH52" in k.columns else -0.2
+    volz20 = last(k["VolZ20"]) if "VolZ20" in k.columns else 0.0
 
-    close = float(df["Close"].dropna().iloc[-1]) if "Close" in df.columns and df["Close"].notna().any() else np.nan
-    above50 = int(k["close_above_sma50"].dropna().iloc[-1]) if "close_above_sma50" in k.columns and k["close_above_sma50"].notna().any() else 0
+    # --- Bonus SMA50 calculé inline (PAS de colonne close_above_sma50) ---
+    above50 = int(not (np.isnan(close) or np.isnan(sma50)) and (sma50 != 0) and (close > sma50))
+    bonus50 = 0.15 if above50 == 1 else -0.05
 
     # Normalisations [-1,1]
     rsi_s = np.clip(1 - 2 * abs(rsi - 50) / 50, -1, 1)
@@ -364,9 +366,8 @@ def compute_score(df: pd.DataFrame):
     macd_s = np.tanh(macd_h / macd_std) if macd_std and macd_std > 0 else 0.0
     sma_ct = np.tanh(((close - sma50) / sma50) * 5) if (not np.isnan(close) and not np.isnan(sma50) and sma50) else 0.0
     sma_lt = np.tanh(((sma50 - sma200) / sma200) * 3) if (not np.isnan(sma50) and not np.isnan(sma200) and sma200) else 0.0
-    hh52_s = -np.tanh((1 - (1 + pct_hh52)) * 2)  # ≈ -tanh(-pct_hh52*2)
+    hh52_s = -np.tanh((1 - (1 + pct_hh52)) * 2)
     vol_s = np.tanh(volz20 / 3)
-    bonus50 = 0.15 if above50 == 1 else -0.05
 
     weights = {"rsi": 0.15, "macd": 0.25, "sma_ct": 0.20, "sma_lt": 0.20, "hh52": 0.10, "vol": 0.10}
     parts = {"rsi": rsi_s, "macd": macd_s, "sma_ct": sma_ct, "sma_lt": sma_lt, "hh52": hh52_s, "vol": vol_s}
