@@ -20,11 +20,41 @@ from importlib import reload
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import api.core.scoring as scoring
 reload(scoring)  # force le rechargement du module
-from api.core.scoring import compute_kpis, compute_score
+from api.core.scoring import (
+    compute_kpis,
+    compute_kpis_investor,
+    compute_score,
+    compute_score_investor,
+)
 from api.core.isin_resolver import resolve_isin_to_ticker
 
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Trading Scanner", layout="wide")
+
+# --- Profil d'analyse ---
+PROFILE_KEY = "analysis_profile"
+
+
+def get_analysis_profile() -> str:
+    return st.session_state.get(PROFILE_KEY, "Investisseur")
+
+
+def get_score_label() -> str:
+    return "Score (LT)" if get_analysis_profile() == "Investisseur" else "Score"
+
+
+def rename_score_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame):
+        return df
+    score_label = get_score_label()
+    if score_label != "Score" and score_label not in df.columns and "Score" in df.columns:
+        return df.rename(columns={"Score": score_label})
+    return df
+
+
+def map_score_column(columns: list[str]) -> list[str]:
+    score_label = get_score_label()
+    return [score_label if c == "Score" else c for c in columns]
 
 # ---------- AUTH (simple & robuste) ----------
 USERNAME = "egorge"
@@ -68,6 +98,16 @@ st.sidebar.success(f"Connecté comme {USERNAME}")
 if st.sidebar.button("Se déconnecter"):
     st.session_state.clear()
     st.rerun()
+
+if PROFILE_KEY not in st.session_state:
+    st.session_state[PROFILE_KEY] = "Investisseur"
+
+st.sidebar.selectbox(
+    "Profil d’analyse",
+    options=["Investisseur", "Swing"],
+    index=0,
+    key=PROFILE_KEY,
+)
 
 # ========= FICHIERS =========
 UNIVERSE_PATH = "data/watchlist.csv"
@@ -351,7 +391,9 @@ def score_one(ticker: str):
         return {"Ticker": tkr, "error": why}
 
     try:
-        df = safe_yf_download(tkr, period="9mo", interval="1d")
+        profile = get_analysis_profile()
+        period = "36mo" if profile == "Investisseur" else "9mo"
+        df = safe_yf_download(tkr, period=period, interval="1d")
         if df is None or df.empty or "Close" not in df.columns:
             return {"Ticker": tkr, "error": "no_data"}
 
@@ -359,17 +401,62 @@ def score_one(ticker: str):
         if df.empty:
             return {"Ticker": tkr, "error": "no_close"}
 
-        kpis = compute_kpis(df)
-        cs = compute_score(df)
-        score = None
-        signal_code = None
-        if isinstance(cs, (list, tuple)):
-            if len(cs) > 0:
-                score = cs[0]
-            if len(cs) > 1:
-                signal_code = cs[1]
+        rsi_val = None
+        macd_h = None
+        pct_hh = None
+        volz20 = None
+        close_gt_sma50 = None
+        sma50_gt_sma200 = None
+
+        action = None
+
+        if profile == "Investisseur":
+            score, action = compute_score_investor(df)
+            kpis_lt = compute_kpis_investor(df)
+            if isinstance(kpis_lt, pd.DataFrame) and "%toHH52w" in kpis_lt.columns:
+                pct_series = kpis_lt["%toHH52w"].dropna()
+                if not pct_series.empty:
+                    pct_hh = float(pct_series.iloc[-1])
         else:
-            score = cs
+            kpis = compute_kpis(df)
+            cs = compute_score(df)
+            score = None
+            action = None
+            if isinstance(cs, (list, tuple)):
+                if len(cs) > 0:
+                    score = cs[0]
+                if len(cs) > 1:
+                    action = cs[1]
+            else:
+                score = cs
+
+            if isinstance(kpis, pd.DataFrame):
+                if "RSI" in kpis.columns:
+                    rsi_series = kpis["RSI"].dropna()
+                    if not rsi_series.empty:
+                        rsi_val = float(rsi_series.iloc[-1])
+                if "MACD_hist" in kpis.columns:
+                    macd_series = kpis["MACD_hist"].dropna()
+                    if not macd_series.empty:
+                        macd_h = float(macd_series.iloc[-1])
+                if "%toHH52" in kpis.columns:
+                    pct_series = kpis["%toHH52"].dropna()
+                    if not pct_series.empty:
+                        pct_hh = float(pct_series.iloc[-1])
+                if "VolZ20" in kpis.columns:
+                    vol_series = kpis["VolZ20"].dropna()
+                    if not vol_series.empty:
+                        volz20 = float(vol_series.iloc[-1])
+                close_series = df["Close"].dropna()
+                close_last = float(close_series.iloc[-1]) if not close_series.empty else np.nan
+                sma50_last = float(kpis["SMA50"].dropna().iloc[-1]) if "SMA50" in kpis.columns and not kpis["SMA50"].dropna().empty else np.nan
+                sma200_last = float(kpis["SMA200"].dropna().iloc[-1]) if "SMA200" in kpis.columns and not kpis["SMA200"].dropna().empty else np.nan
+                if not np.isnan(close_last) and not np.isnan(sma50_last):
+                    close_gt_sma50 = close_last > sma50_last
+                if not np.isnan(sma50_last) and not np.isnan(sma200_last):
+                    sma50_gt_sma200 = sma50_last > sma200_last
+
+        signal_code = action
 
         uni = load_universe_df()
         name = ""
@@ -389,10 +476,13 @@ def score_one(ticker: str):
             "Market": market,
             "Signal": signal_code,
             "Score": float(score) if score is not None else None,
-            "RSI": float(kpis["RSI"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "RSI" in kpis else None,
-            "MACD_hist": float(kpis["MACD_hist"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "MACD_hist" in kpis else None,
-            "%toHH52": float(kpis["%toHH52"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "%toHH52" in kpis else None,
-            "VolZ20": float(kpis["VolZ20"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "VolZ20" in kpis else None,
+            "RSI": rsi_val,
+            "MACD_hist": macd_h,
+            "%toHH52": pct_hh,
+            "VolZ20": volz20,
+            "Close>SMA50": close_gt_sma50,
+            "SMA50>SMA200": sma50_gt_sma200,
+            "Profile": profile,
         }
 
     except Exception as e:
@@ -513,6 +603,7 @@ with tab_scan:
     st.title("Scanner — Ma watchlist (perso)")
     my_wl = load_my_watchlist()
     uni = load_universe()
+    score_label = get_score_label()
 
     with st.expander("📥 Ajouter depuis la base (nom / ISIN / ticker)", expanded=True):
         q = st.text_input("Rechercher dans la base", "")
@@ -571,13 +662,16 @@ with tab_scan:
             df_out = (pd.DataFrame(rows)
                       .sort_values(by=["Score","Ticker"], ascending=[False, True])
                       .reset_index(drop=True))
-            cols = ["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
-            df_out = df_out[[c for c in cols if c in df_out.columns]]
-            st.dataframe(df_out, use_container_width=True)
+            display_df = rename_score_for_display(df_out)
+            cols = ["Ticker","Name","Score","Signal","Profile","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
+            display_cols = map_score_column(cols)
+            display_cols = [c for c in display_cols if c in display_df.columns]
+            st.dataframe(display_df[display_cols], use_container_width=True)
 
             st.markdown("**Top 10 opportunités 🟢**")
-            st.dataframe(df_out.head(10)[["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20"]],
-                         use_container_width=True)
+            top_cols = map_score_column(["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20"])
+            top_cols = [c for c in top_cols if c in display_df.columns]
+            st.dataframe(display_df.head(10)[top_cols], use_container_width=True)
 
             st.markdown("### 🗑️ Supprimer une valeur depuis les résultats")
             for i, r in df_out.iterrows():
@@ -587,7 +681,7 @@ with tab_scan:
                 with c2:
                     st.write(r.get("Name", ""))
                 with c3:
-                    st.write(f"Score: {r['Score']}")
+                    st.write(f"{score_label}: {r['Score']}")
                 with c4:
                     if st.button("🗑️ Retirer", key=f"del_{i}_{r['Ticker']}"):
                         before = len(my_wl)
@@ -664,47 +758,66 @@ with tab_single:
     nm = get_name_for_ticker(ticker_input)
     if nm:
         st.caption(f"**{nm}**")
+    profile = get_analysis_profile()
+    score_label = get_score_label()
     if ticker_input:
         try:
-            df = yf.download(ticker_input, period="6mo", interval="1d", progress=False)
+            period = "36mo" if profile == "Investisseur" else "9mo"
+            df = safe_yf_download(_norm_ticker(ticker_input), period=period, interval="1d")
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             if df.empty or "Close" not in df.columns:
                 st.warning("Pas de données utilisables.")
             else:
-                kpis = compute_kpis(df)
-                cs = compute_score(df)
-                score = np.nan
-                signal = None
-                details: dict[str, object] = {}
-                if isinstance(cs, (list, tuple)):
-                    score = cs[0] if len(cs) >= 1 else np.nan
-                    signal = cs[1] if len(cs) >= 2 else None
-                    if len(cs) >= 3 and isinstance(cs[2], dict):
-                        details = cs[2]
+                if profile == "Investisseur":
+                    score, signal = compute_score_investor(df)
+                    kpis_lt = compute_kpis_investor(df)
+                    st.subheader(f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}")
+                    last = kpis_lt.iloc[-1] if not kpis_lt.empty else pd.Series(dtype="float64")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("SMA26w", f"{float(last.get('SMA26w', np.nan)):.2f}" if not kpis_lt.empty else "–")
+                        st.metric("SMA52w", f"{float(last.get('SMA52w', np.nan)):.2f}" if not kpis_lt.empty else "–")
+                    with col2:
+                        pct_hh = float(last.get("%toHH52w", np.nan)) if not kpis_lt.empty else np.nan
+                        st.metric("% to 52w High", f"{pct_hh*100:.2f}%" if not np.isnan(pct_hh) else "–")
+                        mom = float(last.get("MOM_12m_minus_1m", np.nan)) if not kpis_lt.empty else np.nan
+                        st.metric("Momentum 12-1", f"{mom*100:.2f}%" if not np.isnan(mom) else "–")
+                    with col3:
+                        rv = float(last.get("RV20w", np.nan)) if not kpis_lt.empty else np.nan
+                        st.metric("Volatilité 20w", f"{rv:.2%}" if not np.isnan(rv) else "–")
+                        dd = float(last.get("DD26w", np.nan)) if not kpis_lt.empty else np.nan
+                        st.metric("Drawdown 26w", f"{dd*100:.2f}%" if not np.isnan(dd) else "–")
                 else:
-                    score = cs
-                st.subheader(f"{ticker_input} — Score: {score:.2f} | Signal: {signal}")
-                last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("RSI(14)", f"{float(last.get('RSI', np.nan)):.1f}" if not kpis.empty else "–")
-                    st.metric("MACD hist", f"{float(last.get('MACD_hist', np.nan)):.3f}" if not kpis.empty else "–")
-                with col2:
-                    st.metric(
-                        "Close > SMA50",
-                        "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
-                    )
-                    st.metric(
-                        "SMA50 > SMA200",
-                        "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
-                    )
-                with col3:
-                    pct_hh = float(last.get("pct_to_HH52", np.nan)) * 100 if not kpis.empty else np.nan
-                    st.metric("% to 52w High", f"{pct_hh:.2f}%" if not np.isnan(pct_hh) else "–")
-                    volz = float(last.get("VolZ20", np.nan)) if not kpis.empty else np.nan
-                    st.metric("Vol Z20", f"{volz:.2f}" if not np.isnan(volz) else "–")
-                st.caption(f"Probabilité d'upside 5j: {details.get('p_up', np.nan):.2%}")
+                    kpis = compute_kpis(df)
+                    cs = compute_score(df)
+                    score = np.nan
+                    signal = None
+                    if isinstance(cs, (list, tuple)):
+                        score = cs[0] if len(cs) >= 1 else np.nan
+                        signal = cs[1] if len(cs) >= 2 else None
+                    else:
+                        score = cs
+                    st.subheader(f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}")
+                    last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("RSI(14)", f"{float(last.get('RSI', np.nan)):.1f}" if not kpis.empty else "–")
+                        st.metric("MACD hist", f"{float(last.get('MACD_hist', np.nan)):.3f}" if not kpis.empty else "–")
+                    with col2:
+                        st.metric(
+                            "Close > SMA50",
+                            "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
+                        )
+                        st.metric(
+                            "SMA50 > SMA200",
+                            "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
+                        )
+                    with col3:
+                        pct_hh = float(last.get("pct_to_HH52", np.nan)) * 100 if not kpis.empty else np.nan
+                        st.metric("% to 52w High", f"{pct_hh:.2f}%" if not np.isnan(pct_hh) else "–")
+                        volz = float(last.get("VolZ20", np.nan)) if not kpis.empty else np.nan
+                        st.metric("Vol Z20", f"{volz:.2f}" if not np.isnan(volz) else "–")
                 st.line_chart(df[["Close"]])
         except Exception as e:
             st.error(f"Erreur : {e}")
@@ -713,6 +826,7 @@ with tab_single:
 
 with tab_full:
     st.title("Scanner complet — Univers entier")
+    score_label = get_score_label()
 
     with st.form("full_scan_form", clear_on_submit=False):
         colf1, colf2, colf3, colf4 = st.columns([1, 2, 1, 1])
@@ -750,7 +864,7 @@ with tab_full:
         used_cache = True
         ts = cached_meta.get("timestamp", "?") if isinstance(cached_meta, dict) else "?"
         st.success(f"Dernier scan chargé depuis le cache (filtres identiques) — {ts}")
-        st.dataframe(cached_df, use_container_width=True)
+        st.dataframe(rename_score_for_display(cached_df), use_container_width=True)
         if st.button("🔄 Rafraîchir ce scan"):
             do_scan = True
             used_cache = False
@@ -852,16 +966,20 @@ with tab_full:
             except Exception as e:
                 st.warning(f"Comparaison classement vs veille impossible: {e}")
 
-            cols = ["Ticker", "Name", "Market", "Signal", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
+            cols = ["Ticker", "Name", "Market", "Signal", "Profile", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
             out = out[[c for c in cols if c in out.columns]]
 
-            meta = save_full_scan_cache(out, sel_markets, query, int(limit))
+            display_out = rename_score_for_display(out)
+            display_cols = map_score_column(cols)
+            display_cols = [c for c in display_cols if c in display_out.columns]
+
+            meta = save_full_scan_cache(display_out, sel_markets, query, int(limit))
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.caption(f"Sauvegardé comme 'dernier scan' — {meta.get('timestamp')}")
-            st.dataframe(out, use_container_width=True)
+            st.dataframe(display_out[display_cols], use_container_width=True)
 
             buffer = io.StringIO()
-            out.to_csv(buffer, index=False)
+            rename_score_for_display(out).to_csv(buffer, index=False)
             st.download_button(
                 "⬇️ Exporter résultats (CSV)",
                 data=buffer.getvalue().encode(),
@@ -898,7 +1016,7 @@ with tab_full:
                     st.code(last_trace, language="python")
     elif used_cache and cached_df is not None:
         buffer = io.StringIO()
-        cached_df.to_csv(buffer, index=False)
+        rename_score_for_display(cached_df).to_csv(buffer, index=False)
         st.download_button(
             "⬇️ Exporter résultats (CSV)",
             data=buffer.getvalue().encode(),
@@ -993,6 +1111,7 @@ with tab_full:
             cols = [
                 "Ticker",
                 "Name",
+                "Profile",
                 "Score",
                 "Signal",
                 "RSI",
@@ -1003,7 +1122,10 @@ with tab_full:
                 "SMA50>SMA200",
             ]
             df_wl = df_wl[[c for c in cols if c in df_wl.columns]]
-            st.dataframe(df_wl, use_container_width=True)
+            display_wl = rename_score_for_display(df_wl)
+            display_cols = map_score_column(cols)
+            display_cols = [c for c in display_cols if c in display_wl.columns]
+            st.dataframe(display_wl[display_cols], use_container_width=True)
 
             st.markdown("#### Retirer une valeur de cette watchlist")
             for i, r in df_wl.iterrows():
@@ -1011,7 +1133,7 @@ with tab_full:
                 with c1:
                     st.write(f"**{r['Ticker']}** — {r.get('Name', '')}")
                 with c2:
-                    st.write(f"Score: {r['Score']} | Signal: {r.get('Signal', '')}")
+                    st.write(f"{score_label}: {r['Score']} | Signal: {r.get('Signal', '')}")
                 with c3:
                     if st.button("🗑️", key=f"full_wl_del_{i}_{r['Ticker']}"):
                         wl = load_full_scan_watchlist()
