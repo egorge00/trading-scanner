@@ -53,7 +53,7 @@ def resolve_isin_to_ticker(isin: str, name_hint: Optional[str] = None) -> Option
         if any(sym.endswith(suf) for suf in (".PA",".FP",".AS",".BR",".MI",".MC",".LS",".DE",".F",".BE",".SW",".VI")):
             sc += 3
         # bonus USA
-        if not "." in sym:
+        if "." not in sym:
             sc += 2
         # bonus si le nom contient l'indice name_hint
         if name_hint:

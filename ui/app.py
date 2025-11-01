@@ -4,27 +4,29 @@ import io
 import difflib
 import datetime as dt
 import base64
-import json
+from pathlib import Path
 import bcrypt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 import requests
 import traceback
 from importlib import reload
 
 # --- rendre importable le package "api" depuis /ui ---
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import api.core.scoring as scoring
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+import api.core.scoring as scoring  # noqa: E402
+
 reload(scoring)  # force le rechargement du module
-from api.core.scoring import (
+from api.core.scoring import (  # noqa: E402
     compute_kpis,
     compute_kpis_investor,
     compute_score,
     compute_score_investor,
 )
-from api.core.isin_resolver import resolve_isin_to_ticker
 
 # --- Normalisation marchés ---
 def _norm_market(m: str) -> str:
@@ -90,10 +92,17 @@ def _now_iso():
 
     return _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-# ---------- CONFIG ----------
-st.set_page_config(page_title="Trading Scanner", layout="wide")
 
-# --- Profil d'analyse ---
+DEBUG_ENV_DEFAULT = os.getenv("APP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+DEBUG_TOGGLE_KEY = "debug_mode_checkbox"
+IMPORT_ONLY = os.getenv("SCANNER_IMPORT_ONLY", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DEBUG_MODE = DEBUG_ENV_DEFAULT
+
 PROFILE_KEY = "analysis_profile"
 
 
@@ -118,58 +127,71 @@ def map_score_column(columns: list[str]) -> list[str]:
     score_label = get_score_label()
     return [score_label if c == "Score" else c for c in columns]
 
-# ---------- AUTH (simple & robuste) ----------
-USERNAME = "egorge"
-PASSWORD_HASH = os.getenv(
-    "PASSWORD_HASH",
-    "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe"
-)
 
-def login_form():
-    st.title("Login")
-    with st.form("login"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        remember = st.checkbox("Se souvenir de moi", value=True)
-        submit = st.form_submit_button("Login")
-    return submit, u, p, remember
+if not IMPORT_ONLY:
+    # ---------- CONFIG ----------
+    st.set_page_config(page_title="Trading Scanner", layout="wide")
 
-def check_password(raw_password: str, bcrypted: str) -> bool:
-    try:
-        return bcrypt.checkpw(raw_password.encode(), bcrypted.encode())
-    except Exception:
-        return False
+    # ---------- AUTH (simple & robuste) ----------
+    USERNAME = "egorge"
+    PASSWORD_HASH = os.getenv(
+        "PASSWORD_HASH",
+        "$2y$12$4LAav5U4KJwaT2YgzYTnf.qaTGo6VjxdkB6oueE//XreoI0D21RKe",
+    )
 
-if "auth" not in st.session_state:
-    st.session_state.auth = False
+    def login_form():
+        st.title("Login")
+        with st.form("login"):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            remember = st.checkbox("Se souvenir de moi", value=True)
+            submit = st.form_submit_button("Login")
+        return submit, u, p, remember
 
-if not st.session_state.auth:
-    submitted, u, p, remember = login_form()
-    if submitted:
-        if u == USERNAME and check_password(p, PASSWORD_HASH):
-            st.session_state.auth = True
-            if remember:
-                st.session_state.remember_until = str(dt.datetime.utcnow() + dt.timedelta(days=30))
-            st.rerun()
-        else:
-            st.error("Identifiants invalides")
-    st.stop()
+    def check_password(raw_password: str, bcrypted: str) -> bool:
+        try:
+            return bcrypt.checkpw(raw_password.encode(), bcrypted.encode())
+        except Exception:
+            return False
 
-# ---------- UI une fois connecté ----------
-st.sidebar.success(f"Connecté comme {USERNAME}")
-if st.sidebar.button("Se déconnecter"):
-    st.session_state.clear()
-    st.rerun()
+    if "auth" not in st.session_state:
+        st.session_state.auth = False
 
-if PROFILE_KEY not in st.session_state:
-    st.session_state[PROFILE_KEY] = "Investisseur"
+    if not st.session_state.auth:
+        submitted, u, p, remember = login_form()
+        if submitted:
+            if u == USERNAME and check_password(p, PASSWORD_HASH):
+                st.session_state.auth = True
+                if remember:
+                    st.session_state.remember_until = str(dt.datetime.utcnow() + dt.timedelta(days=30))
+                st.rerun()
+            else:
+                st.error("Identifiants invalides")
+        st.stop()
 
-st.sidebar.selectbox(
-    "Profil d’analyse",
-    options=["Investisseur", "Swing"],
-    index=0,
-    key=PROFILE_KEY,
-)
+    # ---------- UI une fois connecté ----------
+    st.sidebar.success(f"Connecté comme {USERNAME}")
+    if st.sidebar.button("Se déconnecter"):
+        st.session_state.clear()
+        st.rerun()
+
+    if PROFILE_KEY not in st.session_state:
+        st.session_state[PROFILE_KEY] = "Investisseur"
+
+    st.sidebar.selectbox(
+        "Profil d’analyse",
+        options=["Investisseur", "Swing"],
+        index=0,
+        key=PROFILE_KEY,
+    )
+
+    debug_default = bool(st.session_state.get(DEBUG_TOGGLE_KEY, DEBUG_ENV_DEFAULT))
+    DEBUG_MODE = st.sidebar.checkbox(
+        "Mode debug",
+        value=debug_default,
+        key=DEBUG_TOGGLE_KEY,
+        help="Affiche davantage de diagnostics en cas d'erreur (colonnes, shapes).",
+    )
 
 # ========= FICHIERS =========
 UNIVERSE_PATH = "data/watchlist.csv"
@@ -406,15 +428,21 @@ def safe_yf_download(tkr: str, period="9mo", interval="1d") -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def score_one(ticker: str):
+def score_one(ticker: str, profile: str | None = None, *, debug: bool = False):
     """Thread-safe: ne modifie pas st.session_state. Retourne un dict score ou {'error','trace'}."""
+
     tkr = _norm_ticker(ticker)
     ok, why = validate_ticker(tkr)
     if not ok:
         return {"Ticker": tkr, "error": why}
 
+    profile = (profile or "Investisseur").strip().title()
+    if profile not in {"Investisseur", "Swing"}:
+        profile = "Investisseur"
+
+    df = pd.DataFrame()
+
     try:
-        profile = get_analysis_profile()
         period = "36mo" if profile == "Investisseur" else "9mo"
         df = safe_yf_download(tkr, period=period, interval="1d")
         if df is None or df.empty or "Close" not in df.columns:
@@ -472,8 +500,16 @@ def score_one(ticker: str):
                         volz20 = float(vol_series.iloc[-1])
                 close_series = df["Close"].dropna()
                 close_last = float(close_series.iloc[-1]) if not close_series.empty else np.nan
-                sma50_last = float(kpis["SMA50"].dropna().iloc[-1]) if "SMA50" in kpis.columns and not kpis["SMA50"].dropna().empty else np.nan
-                sma200_last = float(kpis["SMA200"].dropna().iloc[-1]) if "SMA200" in kpis.columns and not kpis["SMA200"].dropna().empty else np.nan
+                sma50_last = (
+                    float(kpis["SMA50"].dropna().iloc[-1])
+                    if "SMA50" in kpis.columns and not kpis["SMA50"].dropna().empty
+                    else np.nan
+                )
+                sma200_last = (
+                    float(kpis["SMA200"].dropna().iloc[-1])
+                    if "SMA200" in kpis.columns and not kpis["SMA200"].dropna().empty
+                    else np.nan
+                )
                 if not np.isnan(close_last) and not np.isnan(sma50_last):
                     close_gt_sma50 = close_last > sma50_last
                 if not np.isnan(sma50_last) and not np.isnan(sma200_last):
@@ -505,14 +541,20 @@ def score_one(ticker: str):
             "VolZ20": volz20,
             "Close>SMA50": close_gt_sma50,
             "SMA50>SMA200": sma50_gt_sma200,
-            "Profile": profile,
         }
 
     except Exception as e:
+        debug_payload = None
+        if debug:
+            debug_payload = {
+                "df_shape": getattr(df, "shape", None),
+                "df_columns": list(df.columns) if isinstance(df, pd.DataFrame) else None,
+            }
         return {
             "Ticker": tkr,
             "error": f"exception:{type(e).__name__}:{e}",
-            "trace": traceback.format_exc()
+            "trace": traceback.format_exc(),
+            "debug": debug_payload,
         }
 
 # ========= Recherche dans l'univers (nom / isin / ticker) =========
@@ -569,8 +611,8 @@ def export_positions_bytes(df: pd.DataFrame) -> bytes:
 @st.cache_data(show_spinner=False, ttl=30)
 def last_close(ticker: str) -> float | None:
     try:
-        df = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=False)
-        if df is None or df.empty or "Close" not in df.columns: 
+        df = safe_yf_download(ticker, period="5d", interval="1d")
+        if df is None or df.empty or "Close" not in df.columns:
             return None
         return float(df["Close"].iloc[-1])
     except Exception:
@@ -588,7 +630,7 @@ def compute_pnl_row(row: pd.Series) -> dict:
     return {"last": lc, "pnl_abs": pnl_abs, "pnl_pct": pnl_pct}
 
 def signal_for_ticker(ticker: str) -> tuple[str, float] | None:
-    res = score_one(ticker)
+    res = score_one(ticker, profile=get_analysis_profile(), debug=DEBUG_MODE)
     if not isinstance(res, dict) or res.get("error"):
         return None
     return res.get("Signal", ""), float(res.get("Score", 0))
@@ -627,6 +669,7 @@ with tab_scan:
     my_wl = load_my_watchlist()
     uni = load_universe()
     score_label = get_score_label()
+    profile_current = get_analysis_profile()
 
     with st.expander("📥 Ajouter depuis la base (nom / ISIN / ticker)", expanded=True):
         q = st.text_input("Rechercher dans la base", "")
@@ -667,7 +710,7 @@ with tab_scan:
         n = len(tickers)
         for i, tkr in enumerate(tickers, start=1):
             prog.progress(i / max(n, 1))
-            res = score_one(tkr)
+            res = score_one(tkr, profile=profile_current, debug=DEBUG_MODE)
             if not isinstance(res, dict):
                 failures.append({"Ticker": _norm_ticker(tkr), "error": "invalid_return"})
                 continue
@@ -686,13 +729,35 @@ with tab_scan:
                       .sort_values(by=["Score","Ticker"], ascending=[False, True])
                       .reset_index(drop=True))
             display_df = rename_score_for_display(df_out)
-            cols = ["Ticker","Name","Score","Signal","Profile","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
+            cols = [
+                "Ticker",
+                "Name",
+                "Market",
+                "Score",
+                "Signal",
+                "RSI",
+                "MACD_hist",
+                "%toHH52",
+                "VolZ20",
+                "Close>SMA50",
+                "SMA50>SMA200",
+            ]
             display_cols = map_score_column(cols)
             display_cols = [c for c in display_cols if c in display_df.columns]
             st.dataframe(display_df[display_cols], use_container_width=True)
 
             st.markdown("**Top 10 opportunités 🟢**")
-            top_cols = map_score_column(["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20"])
+            top_cols = map_score_column([
+                "Ticker",
+                "Name",
+                "Market",
+                "Score",
+                "Signal",
+                "RSI",
+                "MACD_hist",
+                "%toHH52",
+                "VolZ20",
+            ])
             top_cols = [c for c in top_cols if c in display_df.columns]
             st.dataframe(display_df.head(10)[top_cols], use_container_width=True)
 
@@ -740,16 +805,11 @@ with tab_scan:
                         last_trace = f["trace"]
                 if last_trace:
                     st.code(last_trace, language="python")
-
-    with st.expander("Test rapide scoring"):
-        t = st.text_input("Ticker de test", "AAPL", key="test_score_one_ticker")
-        if st.button("Tester score_one", key="test_score_one_button"):
-            r = score_one(t)
-            st.write(r)
-            if isinstance(r, dict):
-                trace = r.get("trace")
-                if trace:
-                    st.code(trace, language="python")
+                if DEBUG_MODE:
+                    for f in failures:
+                        if f.get("debug"):
+                            st.caption(f"Debug {f.get('Ticker', '')}:")
+                            st.json(f["debug"])
 
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
@@ -850,6 +910,7 @@ with tab_single:
 with tab_full:
     st.title("Scanner complet — Univers entier")
     score_label = get_score_label()
+    profile_current = get_analysis_profile()
 
     # ====== SCANNER COMPLET ======
     uni = get_universe_normalized()
@@ -874,7 +935,6 @@ with tab_full:
             "Limite de tickers", min_value=10, max_value=2000, value=500, step=50
         )
     with flt4:
-        profile = st.session_state.get(PROFILE_KEY, "Investisseur")
         refresh = st.button("🔄 Rafraîchir les données")
 
     # Multi-sélection marchés quand 'Tous' est décoché
@@ -919,10 +979,13 @@ with tab_full:
     # --- Cache des scans (clé = profil + marchés + recherche + limite)
     mk_key = "ALL" if all_markets else ",".join(sorted(selected_markets))
     q_key = (search_term or "").strip().lower()
-    cache_key = _scan_cache_key(profile, mk_key, q_key, int(limit))
+    cache_key = _scan_cache_key(profile_current, mk_key, q_key, int(limit))
 
     if "full_scan_cache" not in st.session_state:
         st.session_state["full_scan_cache"] = {}
+
+    if refresh:
+        st.session_state["full_scan_cache"].pop(cache_key, None)
 
     use_cache = (not refresh) and (cache_key in st.session_state["full_scan_cache"])
     out = None
@@ -931,7 +994,7 @@ with tab_full:
         cached = st.session_state["full_scan_cache"][cache_key]
         out = cached.get("df")
         st.caption(
-            f"🗂️ Cache: scan du {cached.get('ts')} (profil={profile}, marchés={mk_key}, limite={limit})"
+            f"🗂️ Cache: scan du {cached.get('ts')} (profil={profile_current}, marchés={mk_key}, limite={limit})"
         )
     else:
         # Lancer le scan parallèle UNIQUEMENT sur la sélection filtrée
@@ -945,7 +1008,10 @@ with tab_full:
 
             rows, failures = [], []
             with ThreadPoolExecutor(max_workers=8) as ex:
-                futs = {ex.submit(score_one, t): t for t in ticker_list}
+                futs = {
+                    ex.submit(score_one, t, profile_current, debug=DEBUG_MODE): t
+                    for t in ticker_list
+                }
                 for fut in as_completed(futs):
                     res = fut.result()
                     if isinstance(res, dict) and res.get("error"):
@@ -1000,11 +1066,31 @@ with tab_full:
                     st.dataframe(
                         df_fail[["Ticker", "raison"]], use_container_width=True
                     )
+                    if DEBUG_MODE:
+                        for f in failures:
+                            if f.get("debug"):
+                                st.caption(f"Debug {f.get('Ticker', '')}:")
+                                st.json(f["debug"])
 
     # Affichage résultats
     if isinstance(out, pd.DataFrame) and not out.empty:
         st.subheader("Résultats du scan")
-        st.dataframe(out, use_container_width=True)
+        display_out = rename_score_for_display(out)
+        display_cols = map_score_column(
+            [
+                "Ticker",
+                "Name",
+                "Market",
+                "Signal",
+                "Score",
+                "RSI",
+                "MACD_hist",
+                "%toHH52",
+                "VolZ20",
+            ]
+        )
+        display_cols = [c for c in display_cols if c in display_out.columns]
+        st.dataframe(display_out[display_cols], use_container_width=True)
         # Export CSV
         csv = out.to_csv(index=False).encode("utf-8")
         st.download_button(
@@ -1083,7 +1169,7 @@ with tab_full:
             if not norm_tkr:
                 failures.append({"Ticker": "", "error": "format_ticker_invalide"})
                 continue
-            res = score_one(norm_tkr)
+            res = score_one(norm_tkr, profile=profile_current, debug=DEBUG_MODE)
             if not isinstance(res, dict):
                 failures.append({"Ticker": norm_tkr, "error": "invalid_return"})
                 continue
@@ -1107,7 +1193,7 @@ with tab_full:
             cols = [
                 "Ticker",
                 "Name",
-                "Profile",
+                "Market",
                 "Score",
                 "Signal",
                 "RSI",
@@ -1175,6 +1261,11 @@ with tab_full:
                         last_trace = f["trace"]
                 if last_trace:
                     st.code(last_trace, language="python")
+                if DEBUG_MODE:
+                    for f in failures:
+                        if f.get("debug"):
+                            st.caption(f"Debug {f.get('Ticker', '')}:")
+                            st.json(f["debug"])
 # --------- Onglet 💼 POSITIONS ---------
 with tab_pos:
     st.title("💼 Positions en cours")
