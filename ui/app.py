@@ -5,12 +5,39 @@ import difflib
 import datetime as dt
 import base64
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import bcrypt
 import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
 import traceback
+
+
+def _now_paris_iso():
+    return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def format_signal_from_score(score: float) -> str:
+    """
+    Map le score [-5,5] -> label + emoji pour la colonne 'Signal'.
+    Seuils alignés sur l’ancienne logique BUY/WATCH/HOLD/REDUCE/SELL.
+    """
+
+    if score is None:
+        return "–"
+    s = float(score)
+    if s >= 3.0:
+        return "🟢 BUY"
+    elif s >= 1.5:
+        return "🟡 WATCH"
+    elif s <= -3.0:
+        return "🔴 SELL"
+    elif s <= -1.5:
+        return "🟠 REDUCE"
+    else:
+        return "⚪ HOLD"
 
 # --- rendre importable le package "api" depuis /ui ---
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,10 +111,6 @@ def get_universe_normalized():
         df["market"] = ""
     df["market_norm"] = df["market"].apply(_norm_market)
     return df
-def _now_iso():
-    import datetime as _dt
-
-    return _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 DEBUG_ENV_DEFAULT = os.getenv("APP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -480,11 +503,13 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     except Exception:
         pass
 
+    sig = format_signal_from_score(score)
+
     return {
         "Ticker": tkr,
         "Name": name,
         "Market": market,
-        "Signal": action or "",
+        "Signal": sig,
         "Score": float(score) if score is not None else None,
         "RSI": rsi_val,
         "MACD_hist": macd_h,
@@ -1079,10 +1104,14 @@ with tab_full:
                     "VolZ20",
                 ]
                 out = out[[c for c in cols if c in out.columns]]
+                ts_local = _now_paris_iso()
                 st.session_state["full_scan_cache"][cache_key] = {
                     "df": out,
-                    "ts": _now_iso(),
+                    "ts": ts_local,
                 }
+                st.caption(
+                    f"🕒 Dernier scan : {ts_local} · Profil={profile} · Marchés={mk_key} · Limite={limit}"
+                )
             else:
                 st.info("Aucun résultat exploitable pour ces filtres.")
 
@@ -1106,9 +1135,9 @@ with tab_full:
     elif cache_key in st.session_state["full_scan_cache"]:
         cached = st.session_state["full_scan_cache"][cache_key]
         out = cached.get("df")
-        ts = cached.get("ts")
+        ts = cached.get("ts", _now_paris_iso())
         st.caption(
-            f"🗂️ Affichage du scan en cache du {ts} (profil={profile}, marchés={mk_key}, limite={limit})"
+            f"🗂️ Affichage du scan en cache — 🕒 Dernier scan : {ts} · Profil={profile} · Marchés={mk_key} · Limite={limit}"
         )
     else:
         st.info("Aucun scan encore effectué. Ajuste les filtres et clique “🚀 Lancer le scan complet”.")
