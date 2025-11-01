@@ -1,7 +1,6 @@
 import os
 import sys
 import io
-import time
 import difflib
 import datetime as dt
 import base64
@@ -11,7 +10,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-import concurrent.futures as cf
 import requests
 import traceback
 from importlib import reload
@@ -28,7 +26,7 @@ from api.core.scoring import (
 )
 from api.core.isin_resolver import resolve_isin_to_ticker
 
-# --- Normalisation des codes marché ---
+# --- Normalisation marchés ---
 def _norm_market(m: str) -> str:
     if m is None:
         return ""
@@ -67,8 +65,30 @@ def _norm_market(m: str) -> str:
         "finland": "FI",
         "pt": "PT",
         "portugal": "PT",
+        "etf": "ETF",
+        "exchange traded fund": "ETF",
+        "fund": "ETF",
     }
     return MAP.get(s, s.upper())
+
+
+@st.cache_data(ttl=3600)
+def get_universe_normalized():
+    df = load_universe_df().copy()
+    if "market" not in df.columns:
+        df["market"] = ""
+    df["market_norm"] = df["market"].apply(_norm_market)
+    return df
+
+
+def _scan_cache_key(profile: str, markets_key: str, term: str, limit: int) -> str:
+    return f"{profile}|{markets_key}|{term}|{int(limit)}"
+
+
+def _now_iso():
+    import datetime as _dt
+
+    return _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Trading Scanner", layout="wide")
@@ -156,70 +176,6 @@ UNIVERSE_PATH = "data/watchlist.csv"
 MY_WATCHLIST_KEY = "my_watchlist_df"
 FULL_SCAN_WATCHLIST_KEY = "full_scan_watchlist_df"
 FULL_SCAN_WATCHLIST_PATH = "data/full_scan_watchlist.csv"
-
-# ========= Full Scan Cache (CSV + META JSON) =========
-FULL_SCAN_RESULTS_PATH = "data/full_scan_results.csv"
-FULL_SCAN_META_PATH = "data/full_scan_meta.json"
-
-
-def _normalize_market_filter(value: str) -> str:
-    normalized = (value or "").strip()
-    if not normalized or normalized in {"Tous", "(Tous)"}:
-        return "Tous"
-    return normalized
-
-
-def save_full_scan_cache(
-    df_results: pd.DataFrame, market: str, query: str, limit: int
-):
-    ensure_data_dir()
-    df_to_store = df_results.copy() if isinstance(df_results, pd.DataFrame) else pd.DataFrame()
-    df_to_store.to_csv(FULL_SCAN_RESULTS_PATH, index=False)
-    normalized_market = _normalize_market_filter(market)
-    meta = {
-        "market": normalized_market,
-        "query": (query or "").strip().lower(),
-        "limit": int(limit),
-        "rows": int(len(df_to_store)),
-        "timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    with open(FULL_SCAN_META_PATH, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    return meta
-
-def load_full_scan_cache():
-    try:
-        if not (os.path.exists(FULL_SCAN_RESULTS_PATH) and os.path.exists(FULL_SCAN_META_PATH)):
-            return None, None
-        df = pd.read_csv(FULL_SCAN_RESULTS_PATH)
-        with open(FULL_SCAN_META_PATH, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        return df, meta
-    except Exception:
-        return None, None
-
-def cache_matches_filters(meta: dict, market: str, query: str, limit: int) -> bool:
-    if not meta:
-        return False
-    target_market = _normalize_market_filter(market)
-
-    meta_market = meta.get("market")
-    if meta_market is None:
-        legacy_markets = meta.get("markets")
-        if isinstance(legacy_markets, (list, tuple)):
-            meta_market = legacy_markets[0] if legacy_markets else "Tous"
-        else:
-            meta_market = legacy_markets
-
-    meta_market = _normalize_market_filter(meta_market)
-    meta_query = (meta.get("query", "") or "").strip().lower()
-    normalized_query = (query or "").strip().lower()
-
-    return (
-        meta_market == target_market
-        and meta_query == normalized_query
-        and int(meta.get("limit", -1)) == int(limit)
-    )
 
 # ========= Helpers CSV =========
 def normalize_cols(df: pd.DataFrame, expected=("isin","ticker","name","market")) -> pd.DataFrame:
@@ -525,13 +481,8 @@ def score_one(ticker: str):
 
         signal_code = action
 
-        uni = load_universe_df().copy()
-        if "market" in uni.columns:
-            uni["market_norm"] = uni["market"].apply(_norm_market)
-        else:
-            uni["market_norm"] = ""
-        name = ""
-        market = ""
+        uni = get_universe_normalized()
+        name, market = "", ""
         try:
             sel = uni.loc[
                 uni["ticker"].astype(str).str.upper() == tkr, ["name", "market_norm"]
@@ -900,52 +851,61 @@ with tab_full:
     st.title("Scanner complet — Univers entier")
     score_label = get_score_label()
 
-    universe = load_universe_df().copy()
-    market_series = (
-        universe["market"]
-        if "market" in universe.columns
-        else pd.Series(["" for _ in range(len(universe))], index=universe.index)
-    )
-    universe["market_norm"] = market_series.apply(_norm_market)
-    universe = universe.loc[universe["ticker"].astype(str).str.len() > 0].copy()
+    # ====== SCANNER COMPLET ======
+    uni = get_universe_normalized()
 
-    markets_available = sorted(
-        [m for m in universe["market_norm"].dropna().unique().tolist() if m]
-    )
-    markets_available = ["Tous"] + markets_available
+    # Liste de marchés disponibles (normalisés)
+    markets_all = sorted([m for m in uni["market_norm"].dropna().unique().tolist() if m])
+    if "ETF" not in markets_all:
+        markets_all.append("ETF")  # visible même si pas encore dans les données
 
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col1:
-        market_filter = st.selectbox("Marché", markets_available, index=0)
-    with col2:
+    # UI filtres
+    flt1, flt2, flt3, flt4 = st.columns([1, 2, 1, 1])
+    with flt1:
+        all_markets = st.checkbox(
+            "Tous les marchés",
+            value=True,
+            help="Décoche pour filtrer par un ou plusieurs marchés",
+        )
+    with flt2:
         search_term = st.text_input("Recherche (nom, ticker, ISIN)", "")
-    with col3:
-        limit = st.number_input("Limite de tickers", 10, 2000, 500, step=50)
+    with flt3:
+        limit = st.number_input(
+            "Limite de tickers", min_value=10, max_value=2000, value=500, step=50
+        )
+    with flt4:
+        profile = st.session_state.get(PROFILE_KEY, "Investisseur")
+        refresh = st.button("🔄 Rafraîchir les données")
 
-    do_scan = st.button("🚀 Lancer le scan complet")
+    # Multi-sélection marchés quand 'Tous' est décoché
+    if not all_markets:
+        selected_markets = st.multiselect(
+            "Marchés", options=markets_all, default=markets_all
+        )
+    else:
+        selected_markets = markets_all[:]  # tous
 
-    df_filtered = universe.copy()
-
-    if market_filter != "Tous":
-        df_filtered = df_filtered[df_filtered["market_norm"] == market_filter]
+    # Appliquer filtres (AUCUN préfiltre implicite)
+    df_filtered = uni.copy()
+    if selected_markets and not all_markets:
+        df_filtered = df_filtered[df_filtered["market_norm"].isin(selected_markets)]
 
     if search_term.strip():
         term = search_term.strip().lower()
-        for col in ("name", "ticker", "isin"):
-            if col not in df_filtered.columns:
-                df_filtered[col] = ""
-            df_filtered[col] = df_filtered[col].fillna("")
+        for c in ("name", "ticker", "isin"):
+            if c not in df_filtered.columns:
+                df_filtered[c] = ""
+            df_filtered[c] = df_filtered[c].fillna("")
         df_filtered = df_filtered[
-            df_filtered["name"].astype(str).str.lower().str.contains(term)
-            | df_filtered["ticker"].astype(str).str.lower().str.contains(term)
-            | df_filtered["isin"].astype(str).str.lower().str.contains(term)
+            df_filtered["name"].str.lower().str.contains(term)
+            | df_filtered["ticker"].str.lower().str.contains(term)
+            | df_filtered["isin"].str.lower().str.contains(term)
         ]
 
-    df_filtered = df_filtered.head(int(limit))
+    df_filtered = df_filtered.head(int(limit)).reset_index(drop=True)
 
-    tickers = df_filtered["ticker"].dropna().astype(str).str.strip().tolist()
-
-    tot_univ = len(universe)
+    # Résumé visuel
+    tot_univ = len(uni)
     tot_sel = len(df_filtered)
     by_mkt = (
         df_filtered["market_norm"].value_counts().sort_index().to_dict()
@@ -953,186 +913,104 @@ with tab_full:
         else {}
     )
     st.caption(
-        f"🔎 {tot_sel} valeurs affichées sur {tot_univ} · Par marché : {by_mkt if by_mkt else '—'}"
+        f"🔎 {tot_sel} valeurs filtrées sur {tot_univ} · Par marché: {by_mkt if by_mkt else '—'}"
     )
 
-    cached_df, cached_meta = load_full_scan_cache()
-    used_cache = False
-    if (
-        cached_df is not None
-        and cache_matches_filters(cached_meta, market_filter, search_term, limit)
-        and not do_scan
-    ):
-        used_cache = True
-        ts = cached_meta.get("timestamp", "?") if isinstance(cached_meta, dict) else "?"
-        st.success(f"Dernier scan chargé depuis le cache (filtres identiques) — {ts}")
-        st.dataframe(rename_score_for_display(cached_df), use_container_width=True)
-        if st.button("🔄 Rafraîchir ce scan"):
-            do_scan = True
-            used_cache = False
+    # --- Cache des scans (clé = profil + marchés + recherche + limite)
+    mk_key = "ALL" if all_markets else ",".join(sorted(selected_markets))
+    q_key = (search_term or "").strip().lower()
+    cache_key = _scan_cache_key(profile, mk_key, q_key, int(limit))
 
-    if do_scan:
-        start = time.time()
-        rows = []
-        failures = []
-        done = 0
-        prog = st.progress(0)
+    if "full_scan_cache" not in st.session_state:
+        st.session_state["full_scan_cache"] = {}
 
-        def worker(tkr):
-            return score_one(tkr)
+    use_cache = (not refresh) and (cache_key in st.session_state["full_scan_cache"])
+    out = None
 
-        max_workers = min(8, max(2, os.cpu_count() or 4))
-        with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(worker, t): t for t in tickers}
-            for fut in cf.as_completed(futures):
-                res = fut.result()
-                orig_tkr = futures[fut]
-                norm_tkr = _norm_ticker(orig_tkr)
-                if not isinstance(res, dict):
-                    failures.append({"Ticker": norm_tkr, "error": "invalid_return"})
-                    continue
-                if res.get("error"):
-                    failures.append(
-                        {
-                            "Ticker": res.get("Ticker", norm_tkr),
-                            "error": res["error"],
-                            "trace": res.get("trace"),
-                        }
-                    )
-                else:
-                    rows.append(res)
-                done += 1
-                prog.progress(done / max(len(tickers), 1))
-
-        elapsed = time.time() - start
-
-        if rows:
-            out = (
-                pd.DataFrame(rows)
-                .sort_values(by=["Score", "Ticker"], ascending=[False, True])
-                .reset_index(drop=True)
-            )
-
-            def to_signal(a: str) -> str:
-                return {
-                    "BUY": "🟢 BUY",
-                    "WATCH": "🟢 WATCH",
-                    "HOLD": "⚪ HOLD",
-                    "REDUCE": "🟠 REDUCE",
-                    "SELL": "🔴 SELL",
-                }.get(a, a)
-
-            out["Signal"] = out["Signal"].map(to_signal)
-
-            # --- Sauvegarde journalière ---
-            today = dt.date.today().strftime("%Y-%m-%d")
-            os.makedirs("data/scans", exist_ok=True)
-            daily_path = f"data/scans/{today}.csv"
-            try:
-                out.to_csv(daily_path, index=False)
-                st.caption(f"Résultats sauvegardés : {daily_path}")
-            except Exception as e:
-                st.warning(f"Impossible de sauvegarder le scan du jour: {e}")
-
-            # --- Comparaison classement vs veille ---
-            yesterday = (dt.date.today() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
-            prev_path = f"data/scans/{yesterday}.csv"
-
-            try:
-                if os.path.exists(prev_path):
-                    prev = pd.read_csv(prev_path)
-
-                    out["Rank_today"] = out["Score"].rank(ascending=False, method="min")
-                    if "Score" in prev.columns and "Ticker" in prev.columns:
-                        prev = prev.copy()
-                        prev["Rank_yesterday"] = prev["Score"].rank(ascending=False, method="min")
-                        merged = out.merge(prev[["Ticker", "Rank_yesterday"]], on="Ticker", how="left")
-
-                        def trend_from_ranks(row):
-                            ry = row.get("Rank_yesterday", float("nan"))
-                            rt = row.get("Rank_today", float("nan"))
-                            if pd.isna(ry):
-                                return "🆕"
-                            if rt < ry:
-                                return "↗️"
-                            if rt > ry:
-                                return "↘️"
-                            return "🟰"
-
-                        merged["Trend"] = merged.apply(trend_from_ranks, axis=1)
-                        out = merged
-                    else:
-                        st.info("Fichier de veille trouvé mais colonnes manquantes (Ticker/Score).")
-                else:
-                    st.info("Pas de fichier de veille — aucune comparaison de classement affichée.")
-            except Exception as e:
-                st.warning(f"Comparaison classement vs veille impossible: {e}")
-
-            cols = ["Ticker", "Name", "Market", "Signal", "Profile", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
-            out = out[[c for c in cols if c in out.columns]]
-
-            display_out = rename_score_for_display(out)
-            display_cols = map_score_column(cols)
-            display_cols = [c for c in display_cols if c in display_out.columns]
-
-            # Harmonisation des noms de variables
-            display_out = (
-                display_out.copy()
-                if isinstance(display_out, pd.DataFrame)
-                else pd.DataFrame()
-            )
-            market_param = market_filter
-            query_param = search_term
-            limit_param = int(limit)
-
-            meta = save_full_scan_cache(display_out, market_param, query_param, limit_param)
-            st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
-            st.caption(f"Sauvegardé comme 'dernier scan' — {meta.get('timestamp')}")
-            st.dataframe(display_out[display_cols], use_container_width=True)
-
-            buffer = io.StringIO()
-            rename_score_for_display(out).to_csv(buffer, index=False)
-            st.download_button(
-                "⬇️ Exporter résultats (CSV)",
-                data=buffer.getvalue().encode(),
-                file_name="scan_results.csv",
-                mime="text/csv",
-            )
+    if use_cache:
+        cached = st.session_state["full_scan_cache"][cache_key]
+        out = cached.get("df")
+        st.caption(
+            f"🗂️ Cache: scan du {cached.get('ts')} (profil={profile}, marchés={mk_key}, limite={limit})"
+        )
+    else:
+        # Lancer le scan parallèle UNIQUEMENT sur la sélection filtrée
+        ticker_list = (
+            df_filtered["ticker"].astype(str).str.upper().dropna().unique().tolist()
+        )
+        if not ticker_list:
+            st.info("Aucune valeur à scanner avec ces filtres.")
         else:
-            st.info("Aucun résultat (tickers invalides ou indisponibles).")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        if failures:
-            df_fail = pd.DataFrame(failures)
+            rows, failures = [], []
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                futs = {ex.submit(score_one, t): t for t in ticker_list}
+                for fut in as_completed(futs):
+                    res = fut.result()
+                    if isinstance(res, dict) and res.get("error"):
+                        failures.append(res)
+                    else:
+                        rows.append(res)
 
-            MAP = {
-                "format_ticker_invalide": "Ticker invalide (format Yahoo).",
-                "ticker_hors_univers": "Ticker hors de l'univers suivi.",
-                "no_data": "Aucune donnée renvoyée par Yahoo.",
-                "no_close": "Pas de clôtures exploitables.",
-            }
+            if rows:
+                out = (
+                    pd.DataFrame(rows)
+                    .sort_values(by=["Score", "Ticker"], ascending=[False, True])
+                    .reset_index(drop=True)
+                )
+                # Ordre colonnes (sans "Profile" ni "Action")
+                cols = [
+                    "Ticker",
+                    "Name",
+                    "Market",
+                    "Signal",
+                    "Score",
+                    "RSI",
+                    "MACD_hist",
+                    "%toHH52",
+                    "VolZ20",
+                ]
+                out = out[[c for c in cols if c in out.columns]]
+                # Sauvegarde cache
+                st.session_state["full_scan_cache"][cache_key] = {
+                    "df": out,
+                    "ts": _now_iso(),
+                }
+            else:
+                st.info("Aucun résultat exploitable pour ces filtres.")
 
-            def _reason(e):
-                if isinstance(e, str) and e.startswith("exception:"):
-                    return "Erreur interne: " + e.split(":", 2)[1]
-                return MAP.get(e, str(e))
+            # Diagnostics
+            if failures:
+                df_fail = pd.DataFrame(failures)
+                MAP = {
+                    "format_ticker_invalide": "Ticker invalide",
+                    "ticker_hors_univers": "Hors univers",
+                    "no_data": "Pas de données Yahoo",
+                    "no_close": "Pas de clôtures",
+                }
 
-            df_fail["raison"] = df_fail["error"].apply(_reason)
-            with st.expander("Diagnostics (échecs)"):
-                st.dataframe(df_fail[["Ticker", "raison"]], use_container_width=True)
-                # Stacktrace éventuelle du dernier échec
-                last_trace = None
-                for f in failures:
-                    if "trace" in f and f["trace"]:
-                        last_trace = f["trace"]
-                if last_trace:
-                    st.code(last_trace, language="python")
-    elif used_cache and cached_df is not None:
-        buffer = io.StringIO()
-        rename_score_for_display(cached_df).to_csv(buffer, index=False)
+                def _reason(e):
+                    if isinstance(e, str) and e.startswith("exception:"):
+                        return "Erreur interne: " + e.split(":", 2)[1]
+                    return MAP.get(e, str(e))
+
+                df_fail["raison"] = df_fail["error"].apply(_reason)
+                with st.expander("Diagnostics (échecs)"):
+                    st.dataframe(
+                        df_fail[["Ticker", "raison"]], use_container_width=True
+                    )
+
+    # Affichage résultats
+    if isinstance(out, pd.DataFrame) and not out.empty:
+        st.subheader("Résultats du scan")
+        st.dataframe(out, use_container_width=True)
+        # Export CSV
+        csv = out.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Exporter résultats (CSV)",
-            data=buffer.getvalue().encode(),
-            file_name="scan_results.csv",
+            "💾 Export CSV",
+            data=csv,
+            file_name="full_scan_results.csv",
             mime="text/csv",
         )
 
