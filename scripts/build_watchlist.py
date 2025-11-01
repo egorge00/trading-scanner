@@ -283,6 +283,7 @@ def main():
     keep_cols = ["isin", "ticker", "name", "market"]
     df_final = pd.concat([df_final[keep_cols], etf_df[keep_cols]], ignore_index=True)
     df_final = df_final.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
+    df_final.loc[df_final["ticker"].isin(etf_df["ticker"]), "market"] = "ETF"
 
     csv_path = "data/watchlist.csv"
     df_final.to_csv(csv_path, index=False)
