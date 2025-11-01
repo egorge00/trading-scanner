@@ -23,6 +23,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -40,23 +41,11 @@ try:
 except Exception as e:
     logger.warning("Could not import api.core.scoring (%s). Using fallback scoring.", e)
 
-    class _KPIs:
-        rsi = 50.0
-        macd_hist = 0.0
-        close_above_sma50 = False
-        sma50_above_sma200 = False
-        pct_to_hh52 = 0.0
-        vol_z20 = 0.0
-
     def compute_kpis(_df):  # type: ignore
-        return _KPIs()
+        return pd.DataFrame()
 
-    class _Score:
-        score = 0.0
-        action = "HOLD"
-
-    def compute_score(_k):  # type: ignore
-        return _Score()
+    def compute_score(_df):  # type: ignore
+        return 0.0, "HOLD", {"weights": {}, "p_up": 0.5}
 
 # =============================================================================
 # Helpers marché
@@ -175,19 +164,20 @@ def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[d
                 errors.append({"ticker": tkr, "reason": "no_usable_history"})
                 continue
 
-            k = compute_kpis(history)
-            s = compute_score(k)
+            kpis = compute_kpis(history)
+            score, action, _ = compute_score(history)
+            last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
             rows.append({
                 "Ticker": tkr,
                 "Name": name,
-                "Score": float(getattr(s, "score", 0.0)),
-                "Action": str(getattr(s, "action", "HOLD")),
-                "RSI": round(float(getattr(k, "rsi", 0.0)), 1),
-                "MACD_hist": round(float(getattr(k, "macd_hist", 0.0)), 3),
-                "Close>SMA50": bool(getattr(k, "close_above_sma50", False)),
-                "SMA50>SMA200": bool(getattr(k, "sma50_above_sma200", False)),
-                "%toHH52": float(getattr(k, "pct_to_hh52", 0.0)),
-                "VolZ20": float(getattr(k, "vol_z20", 0.0)),
+                "Score": float(score),
+                "Action": str(action),
+                "RSI": float(last.get("RSI", np.nan)),
+                "MACD_hist": float(last.get("MACD_hist", np.nan)),
+                "Close>SMA50": bool(float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan))),
+                "SMA50>SMA200": bool(float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan))),
+                "%toHH52": float(last.get("pct_to_HH52", np.nan)),
+                "VolZ20": float(last.get("VolZ20", np.nan)),
             })
         except Exception as e:
             errors.append({"ticker": tkr, "reason": f"exception:{type(e).__name__}"})
