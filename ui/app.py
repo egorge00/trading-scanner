@@ -1117,12 +1117,11 @@ with tab_full:
                 m, value=st.session_state.market_checks[m], key=f"mkt_{m}"
             )
 
+    df_filtered = uni.copy()
     selected_markets = [
         str(m).strip().upper() for m, on in st.session_state.market_checks.items() if on
     ]
     all_selected = len(selected_markets) == len(markets_all)
-
-    df_filtered = uni.copy()
     if not all_selected:
         df_filtered = df_filtered[df_filtered["market_norm"].isin(selected_markets)]
     df_filtered = df_filtered.head(int(limit_view)).reset_index(drop=True)
@@ -1147,16 +1146,66 @@ with tab_full:
     out = None
     meta = st.session_state["daily_full_scan"].get(key)
     if meta and isinstance(meta.get("df"), pd.DataFrame) and not meta["df"].empty:
-        out = meta["df"]
+        out = meta["df"].copy()
+
+        # --- Réparation de la colonne Market dans le cache (si absente / vide / cases incohérentes) ---
+        uni_norm = get_universe_normalized().copy()
+        uni_norm["ticker_norm"] = uni_norm["ticker"].astype(str).str.upper().str.strip()
+        uni_map = uni_norm.set_index("ticker_norm")["market_norm"]
+
+        if "Market" not in out.columns:
+            out["Market"] = ""
+
+        # normalise Ticker/Market dans `out`
+        out["Ticker"] = out["Ticker"].astype(str).str.upper().str.strip()
+        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
+
+        # si Market est vide/absent pour des lignes, on le reconstruit depuis l'univers
+        mask_fix = (out["Market"] == "") | out["Market"].isna()
+        if mask_fix.any():
+            out.loc[mask_fix, "Market"] = (
+                out.loc[mask_fix, "Ticker"].map(uni_map).fillna("").astype(str).str.upper()
+            )
+
+        # garde uniquement les colonnes prévues
+        cols = [
+            "Ticker",
+            "Name",
+            "Market",
+            "Signal",
+            "Score",
+            "RSI",
+            "MACD_hist",
+            "%toHH52",
+            "VolZ20",
+        ]
+        out = out[[c for c in cols if c in out.columns]]
+
         st.caption(
             f"🕒 Dernier scan : {meta.get('ts', _now_paris_str())} · Profil={profile}"
         )
 
+        # Sélection marchés depuis l'UI
+        selected_markets = [m for m, on in st.session_state.market_checks.items() if on]
+        all_selected = (
+            len(selected_markets) == len(st.session_state.market_checks)
+            if st.session_state.market_checks
+            else True
+        )
+
         view = out.copy()
+
+        # Normalise Market dans la vue (au cas où)
         if "Market" in view.columns:
             view["Market"] = view["Market"].astype(str).str.strip().str.upper()
-        if not all_selected:
-            view = view[view["Market"].isin(selected_markets)]
+
+        # Filtrage : si aucune case cochée, on n'applique PAS de filtre (évite vue vide par erreur)
+        if not all_selected and selected_markets:
+            view = view[view["Market"].isin([m.upper() for m in selected_markets])]
+        # sinon si aucune case cochée -> pas de filtre (ou affiche un info)
+        elif not selected_markets:
+            st.info("Aucun marché sélectionné — affichage de tout le cache.")
+
         view = view.head(int(limit_view)).reset_index(drop=True)
 
         by_mkt_view = (
@@ -1168,22 +1217,26 @@ with tab_full:
             f"{by_mkt_view if by_mkt_view else '—'}"
         )
 
-        with st.expander("Diagnostic marchés (univers vs cache du jour)"):
-            uni_counts = (
-                uni["market_norm"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .value_counts()
-                .sort_index()
-            )
+        if view.empty:
+            st.warning("La vue filtrée est vide. Clique sur 🔄 Rafraîchir pour relancer un scan complet du jour.")
+
+        with st.expander("Diagnostic marchés (univers / cache / vue)"):
+            uni_counts = uni_norm["market_norm"].value_counts().sort_index().to_dict()
             cache_counts = (
-                view["Market"].value_counts().sort_index()
-                if "Market" in view.columns
-                else pd.Series(dtype=int)
+                out["Market"].value_counts().sort_index().to_dict()
+                if "Market" in out.columns
+                else {}
             )
-            st.write("**Univers (source CSV) :**", uni_counts.to_dict())
-            st.write("**Vue affichée (cache filtré) :**", cache_counts.to_dict())
+            view_counts = (
+                view["Market"].value_counts().sort_index().to_dict()
+                if "Market" in view.columns
+                else {}
+            )
+            st.write("**Univers (CSV)** :", uni_counts)
+            st.write("**Cache du jour (avant filtre)** :", cache_counts)
+            st.write("**Vue affichée (après filtre)** :", view_counts)
+            st.write("Aperçu cache (5 lignes) :")
+            st.dataframe(out.head(5), use_container_width=True)
 
         st.subheader("Résultats (cache du jour)")
         display_out = rename_score_for_display(view)
