@@ -4,11 +4,14 @@ import io
 import time
 import difflib
 import datetime as dt
+import base64
+import json
 import bcrypt
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 import concurrent.futures as cf
+import requests
 
 # --- rendre importable le package "api" depuis /ui ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -127,6 +130,73 @@ def export_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode()
+
+# ========= GitHub persistence (my watchlist) =========
+GITHUB_API = "https://api.github.com"
+
+def _gh_headers():
+    token = st.secrets.get("GITHUB_TOKEN", None)
+    if not token:
+        raise RuntimeError("Secret GITHUB_TOKEN manquant dans Streamlit.")
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+def _gh_repo_branch_path():
+    repo = st.secrets.get("GITHUB_REPO", "").strip() or "egorge00/trading-scanner"
+    branch = st.secrets.get("GITHUB_BRANCH", "").strip() or "main"
+    path = "data/my_watchlist.csv"
+    return repo, branch, path
+
+def gh_get_file(repo: str, path: str, ref: str = "main"):
+    url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
+    r = requests.get(url, headers=_gh_headers(), params={"ref": ref}, timeout=15)
+    if r.status_code == 200:
+        return r.json()
+    if r.status_code == 404:
+        return None
+    raise RuntimeError(f"GitHub GET {path} a échoué: {r.status_code} {r.text}")
+
+def gh_put_file(repo: str, path: str, message: str, content_text: str, sha: str | None, branch: str = "main"):
+    url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
+    b64 = base64.b64encode(content_text.encode()).decode()
+    payload = {"message": message, "content": b64, "branch": branch}
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=_gh_headers(), json=payload, timeout=20)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub PUT {path} a échoué: {r.status_code} {r.text}")
+    return r.json()
+
+def load_my_watchlist_from_github() -> pd.DataFrame | None:
+    try:
+        repo, branch, path = _gh_repo_branch_path()
+        meta = gh_get_file(repo, path, ref=branch)
+        if not meta:
+            return None
+        content_b64 = meta.get("content", "")
+        csv_text = base64.b64decode(content_b64).decode()
+        df = pd.read_csv(io.StringIO(csv_text))
+        return normalize_cols(df)
+    except Exception as e:
+        st.warning(f"Import GitHub impossible: {e}")
+        return None
+
+def save_my_watchlist_to_github(df: pd.DataFrame) -> bool:
+    try:
+        repo, branch, path = _gh_repo_branch_path()
+        df_norm = normalize_cols(df)
+        csv_text = df_norm.to_csv(index=False)
+        sha = None
+        existing = gh_get_file(repo, path, ref=branch)
+        if existing:
+            sha = existing.get("sha")
+        gh_put_file(repo, path, "chore(watchlist): update my_watchlist.csv via app", csv_text, sha, branch)
+        return True
+    except Exception as e:
+        st.warning(f"Sauvegarde GitHub impossible: {e}")
+        return False
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_name_map_from_universe() -> dict:
@@ -338,6 +408,29 @@ with tab_scan:
                         st.rerun()
         else:
             st.info("Aucun résultat (tickers invalides).")
+
+    st.markdown("---")
+    st.subheader("💾 Persistance GitHub — Ma watchlist")
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        if st.button("⬇️ Importer depuis GitHub (data/my_watchlist.csv)"):
+            gh_df = load_my_watchlist_from_github()
+            if gh_df is None or gh_df.empty:
+                st.info("Aucun fichier trouvé ou CSV vide sur GitHub.")
+            else:
+                save_my_watchlist(gh_df)
+                st.success(f"Watchlist importée depuis GitHub ({len(gh_df)} lignes).")
+                st.rerun()
+
+    with colB:
+        if st.button("⬆️ Sauvegarder sur GitHub (data/my_watchlist.csv)"):
+            ok = save_my_watchlist_to_github(load_my_watchlist())
+            if ok:
+                st.success("Watchlist sauvegardée sur GitHub ✅")
+            else:
+                st.error("Échec de la sauvegarde GitHub.")
 
 # --------- Onglet FICHE ---------
 with tab_single:
