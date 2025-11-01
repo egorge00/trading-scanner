@@ -1,9 +1,9 @@
 [theme]
 base = "light"
-primaryColor = "#16a34a"                 # vert (tailwind green-600)
+primaryColor = "#1463FF"
 backgroundColor = "#ffffff"              # blanc
-secondaryBackgroundColor = "#f6f7f9"     # gris très léger pour les panneaux
-textColor = "#0f172a"                    # gris très foncé (lisible)
+secondaryBackgroundColor = "#F6F8FB"
+textColor = "#1F2937"
 font = "sans serif"
 
 [client]
