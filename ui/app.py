@@ -375,15 +375,18 @@ with tab_single:
 with tab_full:
     st.title("Scanner complet — Univers entier")
 
-    uni = load_universe()
-    base = uni.loc[uni["ticker"].astype(str).str.len() > 0].copy()
+    with st.form("full_scan_form", clear_on_submit=False):
+        colf1, colf2, colf3, colf4 = st.columns([1, 2, 1, 1])
 
-    # Filtres
-    colf1, colf2, colf3 = st.columns([1, 2, 1])
-    markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
-    sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
-    query = colf2.text_input("Recherche (ticker ou nom contient…)", "")
-    limit = colf3.number_input("Limite (nb tickers à scanner)", min_value=10, max_value=2000, value=300, step=10)
+        uni = load_universe()
+        base = uni.loc[uni["ticker"].astype(str).str.len() > 0].copy()
+
+        markets = sorted([m for m in base["market"].unique() if isinstance(m, str) and m])
+        sel_markets = colf1.multiselect("Marchés", options=["(Tous)"] + markets, default=["(Tous)"])
+        query = colf2.text_input("Rechercher (ticker ou nom)", "")
+        limit = colf3.number_input("Limite", min_value=10, max_value=2000, value=300, step=10)
+
+        do_scan = colf4.form_submit_button("🚀 Lancer le scan complet")
 
     dfv = base.copy()
     if sel_markets and "(Tous)" not in sel_markets:
@@ -392,50 +395,49 @@ with tab_full:
         q = query.strip().lower()
         dfv = dfv[dfv["ticker"].str.lower().str.contains(q) | dfv["name"].str.lower().str.contains(q)]
 
-    # --- Sélection utilisateur pour la watchlist du scanner complet ---
-    full_wl = load_full_scan_watchlist()
-
-    cand = dfv[["isin", "ticker", "name", "market"]].dropna().copy()
-    if not cand.empty:
-        cand["label"] = cand.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1)
-        options = cand["label"].tolist()
-    else:
-        options = []
-
-    st.markdown("#### Sélectionner des valeurs à suivre (watchlist du Scanner complet)")
-    picked = st.multiselect(
-        "Choisis des valeurs dans la liste filtrée ci-dessus",
-        options=options,
-        default=[],
-        key="full_scan_pick"
-    )
-
-    if st.button("Ajouter à la watchlist du Scanner complet"):
-        if picked:
-            lookup = {row["label"]: row for _, row in cand.iterrows()}
-            to_add = []
-            for p in picked:
-                r = lookup.get(p)
-                if r is not None:
-                    to_add.append({
-                        "isin": r["isin"],
-                        "ticker": r["ticker"],
-                        "name": r["name"],
-                        "market": r["market"],
-                    })
-            if to_add:
-                add_df = pd.DataFrame(to_add)
-                full_wl = pd.concat([full_wl, add_df], ignore_index=True)
-                full_wl = full_wl.drop_duplicates(subset=["ticker", "isin"]).reset_index(drop=True)
-                save_full_scan_watchlist(full_wl)
-                st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
-        else:
-            st.info("Sélectionne au moins une valeur.")
-
     tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    if st.button("🚀 Lancer le scan complet (parallèle)"):
+    # --- Sélection utilisateur pour la watchlist du scanner complet ---
+    full_wl = load_full_scan_watchlist()
+
+    st.markdown("#### Sélectionner des valeurs à suivre (watchlist du Scanner complet)")
+    cand = dfv[["isin", "ticker", "name", "market"]].dropna().copy()
+    if not cand.empty:
+        cand["label"] = cand.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1)
+        picked = st.multiselect(
+            "Choisis des valeurs dans la liste filtrée ci-dessus",
+            options=cand["label"].tolist(),
+            default=[],
+            key="full_scan_pick",
+        )
+        if st.button("Ajouter à la watchlist du Scanner complet"):
+            if picked:
+                lookup = {row["label"]: row for _, row in cand.iterrows()}
+                to_add = []
+                for p in picked:
+                    r = lookup.get(p)
+                    if r is not None:
+                        to_add.append(
+                            {
+                                "isin": r["isin"],
+                                "ticker": r["ticker"],
+                                "name": r["name"],
+                                "market": r["market"],
+                            }
+                        )
+                if to_add:
+                    add_df = pd.DataFrame(to_add)
+                    full_wl = pd.concat([full_wl, add_df], ignore_index=True)
+                    full_wl = full_wl.drop_duplicates(subset=["ticker", "isin"]).reset_index(drop=True)
+                    save_full_scan_watchlist(full_wl)
+                    st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
+            else:
+                st.info("Sélectionne au moins une valeur.")
+    else:
+        st.info("Aucune valeur dans la liste filtrée actuelle.")
+
+    if do_scan:
         start = time.time()
         rows = []
         prog = st.progress(0)
@@ -457,18 +459,19 @@ with tab_full:
         elapsed = time.time() - start
 
         if rows:
-            out = (pd.DataFrame(rows)
-                   .sort_values(by=["Score", "Ticker"], ascending=[False, True])
-                   .reset_index(drop=True))
+            out = (
+                pd.DataFrame(rows)
+                .sort_values(by=["Score", "Ticker"], ascending=[False, True])
+                .reset_index(drop=True)
+            )
 
-            # Signal visuel + colonnes ordonnées avec Name juste après Ticker
             def to_signal(a: str) -> str:
                 return {
                     "BUY": "🟢 BUY",
                     "WATCH": "🟢 WATCH",
                     "HOLD": "⚪ HOLD",
                     "REDUCE": "🟠 REDUCE",
-                    "SELL": "🔴 SELL"
+                    "SELL": "🔴 SELL",
                 }.get(a, a)
 
             out["Signal"] = out["Action"].map(to_signal)
@@ -491,7 +494,6 @@ with tab_full:
                 if os.path.exists(prev_path):
                     prev = pd.read_csv(prev_path)
 
-                    # Rangs (1 = meilleur score)
                     out["Rank_today"] = out["Score"].rank(ascending=False, method="min")
                     if "Score" in prev.columns and "Ticker" in prev.columns:
                         prev = prev.copy()
@@ -502,12 +504,12 @@ with tab_full:
                             ry = row.get("Rank_yesterday", float("nan"))
                             rt = row.get("Rank_today", float("nan"))
                             if pd.isna(ry):
-                                return "🆕"  # nouveau dans le classement
+                                return "🆕"
                             if rt < ry:
-                                return "↗️"  # meilleur rang (monte)
+                                return "↗️"
                             if rt > ry:
-                                return "↘️"  # pire rang (descend)
-                            return "🟰"  # même rang (optionnel)
+                                return "↘️"
+                            return "🟰"
 
                         merged["Trend"] = merged.apply(trend_from_ranks, axis=1)
                         out = merged
@@ -518,7 +520,6 @@ with tab_full:
             except Exception as e:
                 st.warning(f"Comparaison classement vs veille impossible: {e}")
 
-            # --- Réordonner les colonnes (Trend juste après Score) ---
             cols_pref = [
                 "Ticker",
                 "Name",
@@ -536,16 +537,14 @@ with tab_full:
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.dataframe(out, use_container_width=True)
 
-            # Export CSV
             buffer = io.StringIO()
             out.to_csv(buffer, index=False)
             st.download_button(
                 "⬇️ Exporter résultats (CSV)",
                 data=buffer.getvalue().encode(),
                 file_name="scan_results.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
-
         else:
             st.info("Aucun résultat (tickers invalides ou indisponibles).")
 
@@ -562,27 +561,28 @@ with tab_full:
                 rows_wl.append(res)
 
         if rows_wl:
-            df_wl = (pd.DataFrame(rows_wl)
-                     .sort_values(by=["Score", "Ticker"], ascending=[False, True])
-                     .reset_index(drop=True))
+            df_wl = (
+                pd.DataFrame(rows_wl)
+                .sort_values(by=["Score", "Ticker"], ascending=[False, True])
+                .reset_index(drop=True)
+            )
             cols = ["Ticker", "Name", "Score", "Action", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
             df_wl = df_wl[[c for c in cols if c in df_wl.columns]]
+
             st.dataframe(df_wl, use_container_width=True)
 
             st.markdown("#### Retirer une valeur de cette watchlist")
             for i, r in df_wl.iterrows():
-                c1, c2, c3 = st.columns([4, 4, 2])
+                c1, c2, c3 = st.columns([5, 4, 1])
                 with c1:
                     st.write(f"**{r['Ticker']}** — {r.get('Name', '')}")
                 with c2:
                     st.write(f"Score: {r['Score']} | Action: {r['Action']}")
                 with c3:
-                    if st.button("Retirer", key=f"full_wl_del_{i}_{r['Ticker']}"):
+                    if st.button("🗑️", key=f"full_wl_del_{i}_{r['Ticker']}"):
                         wl = load_full_scan_watchlist()
-                        before = len(wl)
                         wl = wl[wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(drop=True)
                         save_full_scan_watchlist(wl)
-                        st.success(f"{r['Ticker']} retiré ({before - len(wl)} ligne).")
                         st.rerun()
 
             buf = io.StringIO()
@@ -591,11 +591,10 @@ with tab_full:
                 "Exporter la watchlist du Scanner complet (CSV)",
                 data=buf.getvalue().encode(),
                 file_name="full_scan_watchlist.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
         else:
             st.info("Impossible de scorer la sélection (tickers invalides ou indisponibles).")
-
 # --------- Onglet 💼 POSITIONS ---------
 with tab_pos:
     st.title("💼 Positions en cours")
