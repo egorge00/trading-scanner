@@ -138,35 +138,40 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         else:
             x = x.droplevel(-1, axis=1)
 
-    # --- 2) Coalescer les colonnes OHLCV ---
+    # --- 2) Coalescer les colonnes OHLCV en Series numériques alignées ---
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
 
-    def _ensure_series(obj, colname, idx):
-        """Retourne une Series float alignée sur idx."""
+    def _as_series(obj, name, idx):
+        """Retourne TOUJOURS une pd.Series[float] alignée sur idx."""
 
         if isinstance(obj, pd.Series):
-            return pd.to_numeric(obj, errors="coerce").astype(float)
-
+            s = pd.to_numeric(obj, errors="coerce").astype(float)
+            return s.reindex(idx)
         if isinstance(obj, pd.DataFrame):
             if obj.shape[1] == 1:
-                ser = obj.iloc[:, 0]
+                s = obj.iloc[:, 0]
             else:
                 cand = obj.apply(lambda s: pd.to_numeric(s, errors="coerce").astype(float))
-                best_col = cand.count().idxmax()
-                ser = cand[best_col]
-            ser.name = colname
-            return ser.astype(float)
-
-        # Fallback: list, ndarray, scalar, None...
+                best = cand.count().idxmax()
+                s = cand[best]
+            s = pd.to_numeric(s, errors="coerce").astype(float)
+            return s.reindex(idx)
+        # Fallback: liste/ndarray/scalar/None → Série alignée
         try:
-            ser = pd.Series(obj, index=idx, name=colname)
+            s = pd.Series(obj, index=idx, name=name)
         except Exception:
-            ser = pd.Series(index=idx, dtype=float, name=colname)
-        return pd.to_numeric(ser, errors="coerce").astype(float)
+            s = pd.Series(index=idx, dtype=float, name=name)
+        s = pd.to_numeric(s, errors="coerce").astype(float)
+        return s.reindex(idx)
 
-    fixed = {c: _ensure_series(x[c], c, x.index) for c in cols}
-    x = pd.DataFrame(fixed).sort_index()
+    # Réécrire colonne par colonne (pas de dict -> DataFrame)
+    for c in cols:
+        x[c] = _as_series(x[c], c, x.index)
+
+    # Si Close absent ou vide après nettoyage → rien à faire
+    if "Close" not in x.columns or x["Close"].dropna().empty:
+        return pd.DataFrame()
 
     # --- 3) Close / Volume propres ---
     if "Close" not in x.columns:
