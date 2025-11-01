@@ -989,7 +989,11 @@ with tab_full:
         c1, c2 = st.columns([1, 1])
         with c1:
             limit = st.number_input(
-                "Limite de tickers", min_value=10, max_value=2000, value=500, step=50
+                "Limite de tickers",
+                min_value=10,
+                max_value=3000,
+                value=1000,
+                step=50,
             )
         with c2:
             colA, colB = st.columns(2)

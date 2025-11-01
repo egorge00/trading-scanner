@@ -5,8 +5,6 @@ import typing as t
 import pandas as pd
 import requests
 
-EXCLUDE_TICKERS = {"BRO", "BRK.B"}  # valeurs à force-exclure
-
 W_SNP = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 W_CAC = "https://en.wikipedia.org/wiki/CAC_40"
 W_ESTOXX = "https://en.wikipedia.org/wiki/EURO_STOXX_50"
@@ -205,10 +203,26 @@ def main():
 
     if "ticker" in all_df.columns:
         all_df["ticker"] = all_df["ticker"].astype(str).str.strip().str.upper()
+
+    # --- Exclusion manuelle de tickers problématiques ---
+    EXCLUDE_TICKERS = {"BRK.B", "BRO", "BF.B"}
+    if "ticker" in all_df.columns:
         all_df = all_df[~all_df["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+    if "isin" in all_df.columns:
+        all_df = all_df[~all_df["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
 
     all_df.to_csv("data/watchlist.csv", index=False)
     print(f"[DONE] data/watchlist.csv écrit ({len(all_df)} lignes)")
+    # Nettoyage manuel du fichier existant (si déjà commité)
+    try:
+        csv_path = "data/watchlist.csv"
+        w = pd.read_csv(csv_path)
+        w = w[~w["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+        w = w[~w["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+        w.to_csv(csv_path, index=False)
+        print(f"✅ Nettoyage terminé : {len(w)} lignes conservées dans {csv_path}")
+    except Exception as e:
+        print(f"⚠️ Impossible de nettoyer le fichier watchlist.csv : {e}")
     # On sort avec code 0 même si des sources manquent, pour éviter l'échec du job
     sys.exit(0)
 
