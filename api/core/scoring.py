@@ -138,15 +138,11 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         else:
             x = x.droplevel(-1, axis=1)
 
-    # --- 2) Coalescer les colonnes OHLCV en Series numériques alignées ---
+    # --- 2) Coalescer les colonnes OHLCV en Series numériques, colonnes uniques ---
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
 
     def _best_series_from_dataframe(df_like: pd.DataFrame, idx, name: str) -> pd.Series:
-        """
-        Sélectionne la colonne la plus 'complète' d'un DataFrame (max non-NaN),
-        la convertit en float et l'aligne sur idx.
-        """
         if df_like.shape[1] == 0:
             return pd.Series(index=idx, dtype=float, name=name)
         best_s, best_cnt = None, -1
@@ -163,35 +159,19 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         return best_s.reindex(idx).astype(float)
 
     def _force_series_any(obj, name: str, idx) -> pd.Series:
-        """
-        Retourne TOUJOURS une pd.Series[float] alignée sur idx, quelle que soit la forme d'entrée :
-        - Series -> numeric float
-        - DataFrame -> choisit la colonne la plus complète
-        - ndarray 2D -> choisit la colonne la plus complète
-        - ndarray 1D / list / scalar -> Series alignée (broadcast si scalaire)
-        """
-        # 1) DataFrame (doublons "Close", etc.)
+        import numpy as np
+
         if isinstance(obj, pd.DataFrame):
             return _best_series_from_dataframe(obj, idx, name)
-
-        # 2) Series
         if isinstance(obj, pd.Series):
             s = pd.to_numeric(obj, errors="coerce")
             return s.reindex(idx).astype(float)
-
-        # 3) Numpy array / listes / scalaires
-        import numpy as np
-
         arr = np.asarray(obj)
-        # 3a) 2D: choisir la meilleure colonne
         if arr.ndim == 2:
+            if arr.shape[0] != len(idx) and arr.shape[1] == len(idx):
+                arr = arr.T
             if arr.shape[0] != len(idx):
-                # si transposé par erreur, on tente l'autre orientation
-                if arr.shape[1] == len(idx):
-                    arr = arr.T
-                else:
-                    # forme inexploitables -> Série vide
-                    return pd.Series(index=idx, dtype=float, name=name)
+                return pd.Series(index=idx, dtype=float, name=name)
             best_s, best_cnt = None, -1
             for j in range(arr.shape[1]):
                 s = pd.Series(arr[:, j], index=idx, name=name)
@@ -199,11 +179,7 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
                 cnt = int(s.notna().sum())
                 if cnt > best_cnt:
                     best_cnt, best_s = cnt, s
-            if best_s is None:
-                return pd.Series(index=idx, dtype=float, name=name)
-            return best_s.astype(float)
-
-        # 3b) 1D (ou scalaire broadcast)
+            return (best_s if best_s is not None else pd.Series(index=idx, dtype=float, name=name)).astype(float)
         try:
             s = pd.Series(arr, index=idx, name=name)
         except Exception:
@@ -211,19 +187,16 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
         s = pd.to_numeric(s, errors="coerce")
         return s.astype(float)
 
-    # Réécriture colonne par colonne (sans dict -> DataFrame)
-    for c in cols:
-        x[c] = _force_series_any(x[c], c, x.index)
+    x_fix = pd.DataFrame(index=x.index)
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
+        if c in x.columns:
+            x_fix[c] = _force_series_any(x[c], c, x.index)
 
-    # Si Close est absent ou vide après nettoyage, on stoppe proprement
-    if "Close" not in x.columns or x["Close"].dropna().empty:
+    if "Close" not in x_fix.columns or x_fix["Close"].dropna().empty:
         return pd.DataFrame()
 
-    # --- 3) Close / Volume propres ---
-    if "Close" not in x.columns:
-        return pd.DataFrame()
-    close = x["Close"].astype(float)
-    vol = x["Volume"] if "Volume" in x.columns else pd.Series(index=close.index, dtype=float)
+    close = x_fix["Close"].astype(float)
+    vol = x_fix["Volume"].astype(float) if "Volume" in x_fix.columns else pd.Series(index=close.index, dtype=float)
 
     # --- 4) RSI(14) ---
     delta = close.diff()
@@ -250,7 +223,7 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     pct_to_hh52 = close / hh52 - 1.0
 
     # --- 8) Z-score Volume(20) ---
-    if vol is not None and vol.notna().any():
+    if "Volume" in x_fix.columns and not vol.dropna().empty:
         vma20 = vol.rolling(20, min_periods=10).mean()
         vstd20 = vol.rolling(20, min_periods=10).std(ddof=0)
         volz20 = (vol - vma20) / vstd20
