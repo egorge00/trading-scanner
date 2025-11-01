@@ -372,6 +372,7 @@ with tab_single:
             st.error(f"Erreur : {e}")
 
 # --------- Onglet 🚀 SCANNER COMPLET (univers) ---------
+
 with tab_full:
     st.title("Scanner complet — Univers entier")
 
@@ -393,55 +394,19 @@ with tab_full:
         dfv = dfv[dfv["market"].isin(sel_markets)]
     if query.strip():
         q = query.strip().lower()
-        dfv = dfv[dfv["ticker"].str.lower().str.contains(q) | dfv["name"].str.lower().str.contains(q)]
-
+        dfv = dfv[
+            dfv["ticker"].str.lower().str.contains(q)
+            | dfv["name"].str.lower().str.contains(q)
+        ]
     tickers = dfv["ticker"].dropna().astype(str).str.strip().tolist()[: int(limit)]
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    # --- Sélection utilisateur pour la watchlist du scanner complet ---
-    full_wl = load_full_scan_watchlist()
-
-    st.markdown("#### Sélectionner des valeurs à suivre (watchlist du Scanner complet)")
-    cand = dfv[["isin", "ticker", "name", "market"]].dropna().copy()
-    if not cand.empty:
-        cand["label"] = cand.apply(lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1)
-        picked = st.multiselect(
-            "Choisis des valeurs dans la liste filtrée ci-dessus",
-            options=cand["label"].tolist(),
-            default=[],
-            key="full_scan_pick",
-        )
-        if st.button("Ajouter à la watchlist du Scanner complet"):
-            if picked:
-                lookup = {row["label"]: row for _, row in cand.iterrows()}
-                to_add = []
-                for p in picked:
-                    r = lookup.get(p)
-                    if r is not None:
-                        to_add.append(
-                            {
-                                "isin": r["isin"],
-                                "ticker": r["ticker"],
-                                "name": r["name"],
-                                "market": r["market"],
-                            }
-                        )
-                if to_add:
-                    add_df = pd.DataFrame(to_add)
-                    full_wl = pd.concat([full_wl, add_df], ignore_index=True)
-                    full_wl = full_wl.drop_duplicates(subset=["ticker", "isin"]).reset_index(drop=True)
-                    save_full_scan_watchlist(full_wl)
-                    st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
-            else:
-                st.info("Sélectionne au moins une valeur.")
-    else:
-        st.info("Aucune valeur dans la liste filtrée actuelle.")
-
+    # ---------- 2) RÉSULTATS DU SCAN ----------
     if do_scan:
         start = time.time()
         rows = []
-        prog = st.progress(0)
         done = 0
+        prog = st.progress(0)
 
         def worker(tkr):
             return score_one(tkr)
@@ -520,7 +485,7 @@ with tab_full:
             except Exception as e:
                 st.warning(f"Comparaison classement vs veille impossible: {e}")
 
-            cols_pref = [
+            cols = [
                 "Ticker",
                 "Name",
                 "Signal",
@@ -531,8 +496,10 @@ with tab_full:
                 "%toHH52",
                 "VolZ20",
                 "Action",
+                "Close>SMA50",
+                "SMA50>SMA200",
             ]
-            out = out[[c for c in cols_pref if c in out.columns]]
+            out = out[[c for c in cols if c in out.columns]]
 
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.dataframe(out, use_container_width=True)
@@ -548,11 +515,59 @@ with tab_full:
         else:
             st.info("Aucun résultat (tickers invalides ou indisponibles).")
 
-    st.markdown("### Watchlist du Scanner complet (sélection utilisateur)")
+    st.divider()
+
+    # ---------- 3) SÉLECTION ----------
+    st.subheader("Sélectionner des valeurs à suivre")
+    full_wl = load_full_scan_watchlist()
+
+    cand = dfv[["isin", "ticker", "name", "market"]].dropna().copy()
+    if not cand.empty:
+        cand["label"] = cand.apply(
+            lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1
+        )
+        picked = st.multiselect(
+            "Choisis des valeurs dans la liste filtrée ci-dessus",
+            options=cand["label"].tolist(),
+            default=[],
+            key="full_scan_pick",
+        )
+        if st.button("Ajouter à la watchlist du Scanner complet"):
+            if picked:
+                lookup = {row["label"]: row for _, row in cand.iterrows()}
+                to_add = []
+                for p in picked:
+                    r = lookup.get(p)
+                    if r is not None:
+                        to_add.append(
+                            {
+                                "isin": r["isin"],
+                                "ticker": r["ticker"],
+                                "name": r["name"],
+                                "market": r["market"],
+                            }
+                        )
+                if to_add:
+                    add_df = pd.DataFrame(to_add)
+                    full_wl = pd.concat([full_wl, add_df], ignore_index=True)
+                    full_wl = full_wl.drop_duplicates(subset=["ticker", "isin"]).reset_index(drop=True)
+                    save_full_scan_watchlist(full_wl)
+                    st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
+            else:
+                st.info("Sélectionne au moins une valeur.")
+    else:
+        st.info("Aucune valeur dans la liste filtrée actuelle.")
+
+    st.divider()
+
+    # ---------- 4) WATCHLIST SCORÉE ----------
+    st.subheader("Watchlist du Scanner complet (sélection utilisateur)")
     full_wl = load_full_scan_watchlist()
 
     if full_wl.empty:
-        st.info("Ta watchlist du Scanner complet est vide. Ajoute des valeurs depuis la sélection au-dessus.")
+        st.info(
+            "Ta watchlist du Scanner complet est vide. Ajoute des valeurs depuis la sélection ci-dessus."
+        )
     else:
         rows_wl = []
         for tkr in full_wl["ticker"].dropna().astype(str).str.strip().unique().tolist():
@@ -566,9 +581,19 @@ with tab_full:
                 .sort_values(by=["Score", "Ticker"], ascending=[False, True])
                 .reset_index(drop=True)
             )
-            cols = ["Ticker", "Name", "Score", "Action", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
+            cols = [
+                "Ticker",
+                "Name",
+                "Score",
+                "Action",
+                "RSI",
+                "MACD_hist",
+                "%toHH52",
+                "VolZ20",
+                "Close>SMA50",
+                "SMA50>SMA200",
+            ]
             df_wl = df_wl[[c for c in cols if c in df_wl.columns]]
-
             st.dataframe(df_wl, use_container_width=True)
 
             st.markdown("#### Retirer une valeur de cette watchlist")
@@ -581,7 +606,9 @@ with tab_full:
                 with c3:
                     if st.button("🗑️", key=f"full_wl_del_{i}_{r['Ticker']}"):
                         wl = load_full_scan_watchlist()
-                        wl = wl[wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(drop=True)
+                        wl = wl[wl["ticker"] != str(r["Ticker"]).strip().upper()].reset_index(
+                            drop=True
+                        )
                         save_full_scan_watchlist(wl)
                         st.rerun()
 
