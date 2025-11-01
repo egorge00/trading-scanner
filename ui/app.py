@@ -588,6 +588,9 @@ def run_full_scan_all_and_cache(profile: str, max_workers: int = 8) -> pd.DataFr
     ]
     out = out[[c for c in cols if c in out.columns]]
 
+    if "Market" in out.columns:
+        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
+
     key = _daily_cache_key(profile)
     st.session_state.setdefault("daily_full_scan", {})
     st.session_state["daily_full_scan"][key] = {"df": out, "ts": _now_paris_str()}
@@ -1114,7 +1117,9 @@ with tab_full:
                 m, value=st.session_state.market_checks[m], key=f"mkt_{m}"
             )
 
-    selected_markets = [m for m, on in st.session_state.market_checks.items() if on]
+    selected_markets = [
+        str(m).strip().upper() for m, on in st.session_state.market_checks.items() if on
+    ]
     all_selected = len(selected_markets) == len(markets_all)
 
     df_filtered = uni.copy()
@@ -1148,6 +1153,8 @@ with tab_full:
         )
 
         view = out.copy()
+        if "Market" in view.columns:
+            view["Market"] = view["Market"].astype(str).str.strip().str.upper()
         if not all_selected:
             view = view[view["Market"].isin(selected_markets)]
         view = view.head(int(limit_view)).reset_index(drop=True)
@@ -1160,6 +1167,23 @@ with tab_full:
             f"{', '.join(selected_markets) if selected_markets else '—'} · Par marché: "
             f"{by_mkt_view if by_mkt_view else '—'}"
         )
+
+        with st.expander("Diagnostic marchés (univers vs cache du jour)"):
+            uni_counts = (
+                uni["market_norm"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .value_counts()
+                .sort_index()
+            )
+            cache_counts = (
+                view["Market"].value_counts().sort_index()
+                if "Market" in view.columns
+                else pd.Series(dtype=int)
+            )
+            st.write("**Univers (source CSV) :**", uni_counts.to_dict())
+            st.write("**Vue affichée (cache filtré) :**", cache_counts.to_dict())
 
         st.subheader("Résultats (cache du jour)")
         display_out = rename_score_for_display(view)
