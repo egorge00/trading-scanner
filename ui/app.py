@@ -69,18 +69,6 @@ if st.sidebar.button("Se déconnecter"):
     st.session_state.clear()
     st.rerun()
 
-# ---------- Test rapide compute_score ----------
-with st.expander("Test compute_score"):
-    t = st.text_input("Ticker test", "AAPL")
-    if st.button("Tester"):
-        df = safe_yf_download(t, period="9mo", interval="1d")
-        st.write("Colonnes df:", list(df.columns))
-        try:
-            st.write("Résultat:", compute_score(df))
-        except Exception as e:
-            st.error(repr(e))
-            st.code(traceback.format_exc())
-
 # ========= FICHIERS =========
 UNIVERSE_PATH = "data/watchlist.csv"
 MY_WATCHLIST_KEY = "my_watchlist_df"
@@ -380,16 +368,20 @@ def score_one(ticker: str):
 
         uni = load_universe_df()
         name = ""
+        market = ""
         try:
-            m = uni.loc[uni["ticker"].astype(str).str.upper() == tkr, "name"]
-            if not m.empty:
-                name = str(m.iloc[0])
+            mask = uni["ticker"].astype(str).str.upper() == tkr
+            if mask.any():
+                row = uni.loc[mask].iloc[0]
+                name = str(row.get("name", ""))
+                market = str(row.get("market", ""))
         except Exception:
             pass
 
         return {
             "Ticker": tkr,
             "Name": name,
+            "Market": market,
             "Score": float(score) if score is not None else None,
             "Action": action,
             "RSI": float(kpis["RSI"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "RSI" in kpis else None,
@@ -858,6 +850,7 @@ with tab_full:
             cols = [
                 "Ticker",
                 "Name",
+                "Market",
                 "Signal",
                 "Score",
                 "Trend",

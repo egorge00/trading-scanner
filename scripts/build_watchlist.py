@@ -5,6 +5,8 @@ import typing as t
 import pandas as pd
 import requests
 
+EXCLUDE_TICKERS = {"BRO", "BRK.B"}  # valeurs à force-exclure
+
 W_SNP = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 W_CAC = "https://en.wikipedia.org/wiki/CAC_40"
 W_ESTOXX = "https://en.wikipedia.org/wiki/EURO_STOXX_50"
@@ -196,6 +198,10 @@ def main():
             all_df[c] = all_df[c].astype(str).str.strip()
     all_df = all_df.drop_duplicates(subset=["ticker","name"]).reset_index(drop=True)
     all_df["isin"] = all_df.get("isin", "").fillna("")
+
+    if "ticker" in all_df.columns:
+        all_df["ticker"] = all_df["ticker"].astype(str).str.strip().str.upper()
+        all_df = all_df[~all_df["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
 
     all_df.to_csv("data/watchlist.csv", index=False)
     print(f"[DONE] data/watchlist.csv écrit ({len(all_df)} lignes)")
