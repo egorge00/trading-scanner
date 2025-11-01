@@ -244,8 +244,8 @@ def signal_for_ticker(ticker: str) -> tuple[str, float] | None:
     return res.get("Action",""), float(res.get("Score", 0))
 
 # ========= Onglets =========
-tab_scan, tab_single, tab_full, tab_pos = st.tabs(
-    ["🔎 Scanner (watchlist)", "📄 Fiche valeur", "🚀 Scanner complet", "💼 Positions"]
+tab_full, tab_scan, tab_single, tab_pos = st.tabs(
+    ["🚀 Scanner complet", "🔎 Scanner (watchlist)", "📄 Fiche valeur", "💼 Positions"]
 )
 # --------- Onglet SCANNER (ma watchlist perso) ---------
 with tab_scan:
