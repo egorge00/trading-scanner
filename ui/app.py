@@ -119,13 +119,26 @@ FULL_SCAN_WATCHLIST_PATH = "data/full_scan_watchlist.csv"
 FULL_SCAN_RESULTS_PATH = "data/full_scan_results.csv"
 FULL_SCAN_META_PATH = "data/full_scan_meta.json"
 
-def save_full_scan_cache(df_out: pd.DataFrame, markets: list[str], query: str, limit: int):
+
+def _normalize_market_filter(value: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized or normalized in {"Tous", "(Tous)"}:
+        return "Tous"
+    return normalized
+
+
+def save_full_scan_cache(
+    df_results: pd.DataFrame, market: str, query: str, limit: int
+):
     ensure_data_dir()
-    df_out.to_csv(FULL_SCAN_RESULTS_PATH, index=False)
+    df_to_store = df_results.copy() if isinstance(df_results, pd.DataFrame) else pd.DataFrame()
+    df_to_store.to_csv(FULL_SCAN_RESULTS_PATH, index=False)
+    normalized_market = _normalize_market_filter(market)
     meta = {
-        "markets": sorted([m for m in markets if m and m != "(Tous)"]),
+        "market": normalized_market,
         "query": (query or "").strip().lower(),
         "limit": int(limit),
+        "rows": int(len(df_to_store)),
         "timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(FULL_SCAN_META_PATH, "w", encoding="utf-8") as f:
@@ -143,14 +156,26 @@ def load_full_scan_cache():
     except Exception:
         return None, None
 
-def cache_matches_filters(meta: dict, markets: list[str], query: str, limit: int) -> bool:
+def cache_matches_filters(meta: dict, market: str, query: str, limit: int) -> bool:
     if not meta:
         return False
-    want_markets = sorted([m for m in markets if m and m != "(Tous)"])
-    cur_markets = meta.get("markets", [])
+    target_market = _normalize_market_filter(market)
+
+    meta_market = meta.get("market")
+    if meta_market is None:
+        legacy_markets = meta.get("markets")
+        if isinstance(legacy_markets, (list, tuple)):
+            meta_market = legacy_markets[0] if legacy_markets else "Tous"
+        else:
+            meta_market = legacy_markets
+
+    meta_market = _normalize_market_filter(meta_market)
+    meta_query = (meta.get("query", "") or "").strip().lower()
+    normalized_query = (query or "").strip().lower()
+
     return (
-        sorted(cur_markets) == sorted(want_markets)
-        and (meta.get("query", "") == (query or "").strip().lower())
+        meta_market == target_market
+        and meta_query == normalized_query
         and int(meta.get("limit", -1)) == int(limit)
     )
 
@@ -864,13 +889,11 @@ with tab_full:
     tickers = df_filtered["ticker"].dropna().astype(str).str.strip().tolist()
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
-    query = search_term
-    want_markets = ["(Tous)"] if market_filter == "Tous" else [market_filter]
     cached_df, cached_meta = load_full_scan_cache()
     used_cache = False
     if (
         cached_df is not None
-        and cache_matches_filters(cached_meta, want_markets, query, limit)
+        and cache_matches_filters(cached_meta, market_filter, search_term, limit)
         and not do_scan
     ):
         used_cache = True
@@ -985,7 +1008,17 @@ with tab_full:
             display_cols = map_score_column(cols)
             display_cols = [c for c in display_cols if c in display_out.columns]
 
-            meta = save_full_scan_cache(display_out, sel_markets, query, int(limit))
+            # Harmonisation des noms de variables
+            display_out = (
+                display_out.copy()
+                if isinstance(display_out, pd.DataFrame)
+                else pd.DataFrame()
+            )
+            market_param = market_filter
+            query_param = search_term
+            limit_param = int(limit)
+
+            meta = save_full_scan_cache(display_out, market_param, query_param, limit_param)
             st.success(f"Scan terminé en {elapsed:.1f}s — {len(out)} lignes")
             st.caption(f"Sauvegardé comme 'dernier scan' — {meta.get('timestamp')}")
             st.dataframe(display_out[display_cols], use_container_width=True)
