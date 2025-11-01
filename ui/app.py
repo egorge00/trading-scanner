@@ -628,7 +628,17 @@ with tab_single:
                 st.warning("Pas de données utilisables.")
             else:
                 kpis = compute_kpis(df)
-                score, action, details = compute_score(df)
+                cs = compute_score(df)
+                score = np.nan
+                action = None
+                details: dict[str, object] = {}
+                if isinstance(cs, (list, tuple)):
+                    score = cs[0] if len(cs) >= 1 else np.nan
+                    action = cs[1] if len(cs) >= 2 else None
+                    if len(cs) >= 3 and isinstance(cs[2], dict):
+                        details = cs[2]
+                else:
+                    score = cs
                 st.subheader(f"{ticker_input} — Score: {score:.2f} | Action: {action}")
                 last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
                 col1, col2, col3 = st.columns(3)

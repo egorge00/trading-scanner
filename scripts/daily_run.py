@@ -45,7 +45,7 @@ except Exception as e:
         return pd.DataFrame()
 
     def compute_score(_df):  # type: ignore
-        return 0.0, "HOLD", {"weights": {}, "p_up": 0.5}
+        return 0.0, "HOLD"
 
 # =============================================================================
 # Helpers marché
@@ -165,13 +165,15 @@ def score_universe(watchlist: pd.DataFrame, period: str = "6mo") -> tuple[list[d
                 continue
 
             kpis = compute_kpis(history)
-            score, action, _ = compute_score(history)
+            cs = compute_score(history)
+            score = cs[0] if isinstance(cs, (list, tuple)) and len(cs) >= 1 else cs
+            action = cs[1] if isinstance(cs, (list, tuple)) and len(cs) >= 2 else None
             last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
             rows.append({
                 "Ticker": tkr,
                 "Name": name,
                 "Score": float(score),
-                "Action": str(action),
+                "Action": str(action) if action is not None else "",
                 "RSI": float(last.get("RSI", np.nan)),
                 "MACD_hist": float(last.get("MACD_hist", np.nan)),
                 "Close>SMA50": bool(float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan))),
