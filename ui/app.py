@@ -28,6 +28,48 @@ from api.core.scoring import (
 )
 from api.core.isin_resolver import resolve_isin_to_ticker
 
+# --- Normalisation des codes marché ---
+def _norm_market(m: str) -> str:
+    if m is None:
+        return ""
+    s = str(m).strip().lower()
+    MAP = {
+        "us": "US",
+        "usa": "US",
+        "united states": "US",
+        "uk": "UK",
+        "gb": "UK",
+        "great britain": "UK",
+        "united kingdom": "UK",
+        "fr": "FR",
+        "france": "FR",
+        "de": "DE",
+        "germany": "DE",
+        "nl": "NL",
+        "netherlands": "NL",
+        "ch": "CH",
+        "switzerland": "CH",
+        "it": "IT",
+        "italy": "IT",
+        "es": "ES",
+        "spain": "ES",
+        "ie": "IE",
+        "ireland": "IE",
+        "be": "BE",
+        "belgium": "BE",
+        "se": "SE",
+        "sweden": "SE",
+        "dk": "DK",
+        "denmark": "DK",
+        "no": "NO",
+        "norway": "NO",
+        "fi": "FI",
+        "finland": "FI",
+        "pt": "PT",
+        "portugal": "PT",
+    }
+    return MAP.get(s, s.upper())
+
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Trading Scanner", layout="wide")
 
@@ -483,15 +525,20 @@ def score_one(ticker: str):
 
         signal_code = action
 
-        uni = load_universe_df()
+        uni = load_universe_df().copy()
+        if "market" in uni.columns:
+            uni["market_norm"] = uni["market"].apply(_norm_market)
+        else:
+            uni["market_norm"] = ""
         name = ""
         market = ""
         try:
-            mask = uni["ticker"].astype(str).str.upper() == tkr
-            if mask.any():
-                row = uni.loc[mask].iloc[0]
-                name = str(row.get("name", ""))
-                market = str(row.get("market", ""))
+            sel = uni.loc[
+                uni["ticker"].astype(str).str.upper() == tkr, ["name", "market_norm"]
+            ]
+            if not sel.empty:
+                name = str(sel["name"].iloc[0])
+                market = str(sel["market_norm"].iloc[0])
         except Exception:
             pass
 
@@ -853,11 +900,19 @@ with tab_full:
     st.title("Scanner complet — Univers entier")
     score_label = get_score_label()
 
-    universe = load_universe_df()
-    base = universe.loc[universe["ticker"].astype(str).str.len() > 0].copy()
+    universe = load_universe_df().copy()
+    market_series = (
+        universe["market"]
+        if "market" in universe.columns
+        else pd.Series(["" for _ in range(len(universe))], index=universe.index)
+    )
+    universe["market_norm"] = market_series.apply(_norm_market)
+    universe = universe.loc[universe["ticker"].astype(str).str.len() > 0].copy()
 
-    markets_available = sorted(base["market"].dropna().astype(str).unique().tolist())
-    markets_available.insert(0, "Tous")
+    markets_available = sorted(
+        [m for m in universe["market_norm"].dropna().unique().tolist() if m]
+    )
+    markets_available = ["Tous"] + markets_available
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col1:
@@ -865,19 +920,21 @@ with tab_full:
     with col2:
         search_term = st.text_input("Recherche (nom, ticker, ISIN)", "")
     with col3:
-        limit = st.number_input("Limite de tickers", 10, 1000, 500, step=50)
+        limit = st.number_input("Limite de tickers", 10, 2000, 500, step=50)
 
     do_scan = st.button("🚀 Lancer le scan complet")
 
-    df_filtered = base.copy()
+    df_filtered = universe.copy()
 
     if market_filter != "Tous":
-        df_filtered = df_filtered[
-            df_filtered["market"].astype(str).str.lower() == market_filter.lower()
-        ]
+        df_filtered = df_filtered[df_filtered["market_norm"] == market_filter]
 
     if search_term.strip():
         term = search_term.strip().lower()
+        for col in ("name", "ticker", "isin"):
+            if col not in df_filtered.columns:
+                df_filtered[col] = ""
+            df_filtered[col] = df_filtered[col].fillna("")
         df_filtered = df_filtered[
             df_filtered["name"].astype(str).str.lower().str.contains(term)
             | df_filtered["ticker"].astype(str).str.lower().str.contains(term)
@@ -887,7 +944,17 @@ with tab_full:
     df_filtered = df_filtered.head(int(limit))
 
     tickers = df_filtered["ticker"].dropna().astype(str).str.strip().tolist()
-    st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
+
+    tot_univ = len(universe)
+    tot_sel = len(df_filtered)
+    by_mkt = (
+        df_filtered["market_norm"].value_counts().sort_index().to_dict()
+        if not df_filtered.empty
+        else {}
+    )
+    st.caption(
+        f"🔎 {tot_sel} valeurs affichées sur {tot_univ} · Par marché : {by_mkt if by_mkt else '—'}"
+    )
 
     cached_df, cached_meta = load_full_scan_cache()
     used_cache = False
@@ -1075,12 +1142,13 @@ with tab_full:
     st.subheader("Sélectionner des valeurs à suivre")
     full_wl = load_full_scan_watchlist()
 
-    needed = ["isin", "ticker", "name", "market"]
+    needed = ["isin", "ticker", "name", "market_norm"]
     cand = df_filtered.copy()
     for col in needed:
         if col not in cand.columns:
             cand[col] = ""
-    cand = cand[needed].dropna().copy()
+    cand = cand[[c for c in needed if c in cand.columns]].dropna(how="all").copy()
+    cand = cand.rename(columns={"market_norm": "Market"})
     if not cand.empty:
         cand["label"] = cand.apply(
             lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1
@@ -1103,7 +1171,7 @@ with tab_full:
                                 "isin": r["isin"],
                                 "ticker": r["ticker"],
                                 "name": r["name"],
-                                "market": r["market"],
+                                "market": r.get("Market", ""),
                             }
                         )
                 if to_add:
