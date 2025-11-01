@@ -444,3 +444,157 @@ def compute_score(df: pd.DataFrame):
 
     return score, action
 
+
+# --- INVESTOR PROFILE (weekly KPIs & LT score) ---
+
+
+def _resample_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample daily OHLCV to weekly (Fri close), robust."""
+
+    x = df.copy()
+    need = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
+    if not need:
+        return pd.DataFrame()
+    x = x[need].sort_index()
+    w = pd.DataFrame(
+        {
+            "Open": x["Open"].resample("W-FRI").last(),
+            "High": x["High"].resample("W-FRI").max(),
+            "Low": x["Low"].resample("W-FRI").min(),
+            "Close": x["Close"].resample("W-FRI").last(),
+            "Volume": x["Volume"].resample("W-FRI").sum(),
+        }
+    ).dropna(subset=["Close"])
+    return w
+
+
+def compute_kpis_investor(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    KPIs long terme (hebdo):
+    - SMA26w (~6 mois), SMA52w (~1 an)
+    - % distance au plus haut 52w
+    - Momentum 12-1 (ret 52w - ret 4w)
+    - Volatilité réalisée 20w (annualisée)
+    - Drawdown 26w (close vs rolling max)
+    """
+
+    w = _resample_weekly_ohlcv(df)
+    if w.empty:
+        return pd.DataFrame()
+
+    close = w["Close"].astype(float)
+    vol = w["Volume"].astype(float) if "Volume" in w.columns else pd.Series(index=close.index, dtype=float)
+
+    sma26 = close.rolling(26, min_periods=8).mean()
+    sma52 = close.rolling(52, min_periods=13).mean()
+
+    hh52 = close.rolling(52, min_periods=13).max()
+    pct_to_hh52 = close / hh52 - 1.0
+
+    def _ret(series, win):
+        s0 = series.shift(win)
+        r = (series / s0) - 1.0
+        return r
+
+    mom52 = _ret(close, 52)
+    mom4 = _ret(close, 4)
+    mom_12m_minus_1m = mom52 - mom4
+
+    ret_w = close.pct_change()
+    rv20w = ret_w.rolling(20, min_periods=10).std(ddof=0) * np.sqrt(52)
+
+    roll_max26 = close.rolling(26, min_periods=8).max()
+    dd26 = close / roll_max26 - 1.0
+
+    out = pd.DataFrame(
+        {
+            "W_Close": close,
+            "SMA26w": sma26,
+            "SMA52w": sma52,
+            "%toHH52w": pct_to_hh52,
+            "MOM_12m_minus_1m": mom_12m_minus_1m,
+            "RV20w": rv20w,
+            "DD26w": dd26,
+        },
+        index=close.index,
+    )
+    return out
+
+
+def compute_score_investor(df: pd.DataFrame):
+    """
+    Score LT ∈ [-5, +5] + action (facultatif pour compat UI):
+    - Trend (Close>SMA52w + pente SMA52w)
+    - Momentum 12-1
+    - %toHH52w
+    - Drawdown 26w (moindre drawdown = mieux)
+    - Volatilité 20w (plus faible = mieux)
+    """
+
+    k = compute_kpis_investor(df)
+    if k.empty:
+        return 0.0, "HOLD"
+
+    def last(col, default=np.nan):
+        if col in k.columns:
+            s = k[col].dropna()
+            if not s.empty:
+                return float(s.iloc[-1])
+        return default
+
+    c = last("W_Close")
+    sma26 = last("SMA26w")
+    sma52 = last("SMA52w")
+    pctH = last("%toHH52w", -0.2)
+    mom = last("MOM_12m_minus_1m", 0.0)
+    rv = last("RV20w", np.nan)
+    dd = last("DD26w", -0.2)
+
+    above52 = int(not (np.isnan(c) or np.isnan(sma52)) and sma52 and c > sma52)
+    try:
+        s52_tail = k["SMA52w"].dropna().tail(13)
+        slope52 = (s52_tail.iloc[-1] / s52_tail.iloc[0] - 1.0) if len(s52_tail) >= 2 else 0.0
+    except Exception:
+        slope52 = 0.0
+
+    trend_s = (0.4 if above52 else -0.2) + np.tanh(slope52 * 5.0) * 0.6
+    trend_s = np.clip(trend_s, -1.0, 1.0)
+
+    mom_s = np.tanh(mom / 0.6)
+
+    hh_s = -np.tanh((1 - (1 + pctH)) * 2.0)
+
+    dd_s = np.tanh((-dd) * 3.0)
+
+    vol_s = -np.tanh(max(rv - 0.30, 0.0) * 3.0) if not np.isnan(rv) else 0.0
+
+    parts = {
+        "trend": trend_s,
+        "mom12_1": mom_s,
+        "hh52": hh_s,
+        "dd26": dd_s,
+        "vol20w": vol_s,
+    }
+    weights = {"trend": 0.35, "mom12_1": 0.25, "hh52": 0.15, "dd26": 0.15, "vol20w": 0.10}
+
+    valid = {k_: v for k_, v in parts.items() if not np.isnan(v)}
+    if not valid:
+        score_norm = 0.0
+    else:
+        wsum = sum(weights[k_] for k_ in valid.keys())
+        score_norm = sum(parts[k_] * (weights[k_] / wsum) for k_ in valid.keys())
+
+    score = float(np.clip(score_norm * 5.0, -5.0, 5.0))
+    if score >= 3.0:
+        action = "BUY"
+    elif score >= 1.5:
+        action = "WATCH"
+    elif score <= -3.0:
+        action = "SELL"
+    elif score <= -1.5:
+        action = "REDUCE"
+    else:
+        action = "HOLD"
+
+    return score, action
+
