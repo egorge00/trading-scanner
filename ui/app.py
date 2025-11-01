@@ -844,22 +844,24 @@ with tab_full:
 
     do_scan = st.button("🚀 Lancer le scan complet")
 
-    df = base.copy()
+    df_filtered = base.copy()
 
     if market_filter != "Tous":
-        df = df[df["market"].astype(str).str.lower() == market_filter.lower()]
+        df_filtered = df_filtered[
+            df_filtered["market"].astype(str).str.lower() == market_filter.lower()
+        ]
 
     if search_term.strip():
         term = search_term.strip().lower()
-        df = df[
-            df["name"].astype(str).str.lower().str.contains(term)
-            | df["ticker"].astype(str).str.lower().str.contains(term)
-            | df["isin"].astype(str).str.lower().str.contains(term)
+        df_filtered = df_filtered[
+            df_filtered["name"].astype(str).str.lower().str.contains(term)
+            | df_filtered["ticker"].astype(str).str.lower().str.contains(term)
+            | df_filtered["isin"].astype(str).str.lower().str.contains(term)
         ]
 
-    df = df.head(int(limit))
+    df_filtered = df_filtered.head(int(limit))
 
-    tickers = df["ticker"].dropna().astype(str).str.strip().tolist()
+    tickers = df_filtered["ticker"].dropna().astype(str).str.strip().tolist()
     st.caption(f"{len(tickers)} tickers sélectionnés pour le scan.")
 
     query = search_term
@@ -1040,7 +1042,12 @@ with tab_full:
     st.subheader("Sélectionner des valeurs à suivre")
     full_wl = load_full_scan_watchlist()
 
-    cand = dfv[["isin", "ticker", "name", "market"]].dropna().copy()
+    needed = ["isin", "ticker", "name", "market"]
+    cand = df_filtered.copy()
+    for col in needed:
+        if col not in cand.columns:
+            cand[col] = ""
+    cand = cand[needed].dropna().copy()
     if not cand.empty:
         cand["label"] = cand.apply(
             lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})", axis=1
@@ -1077,7 +1084,7 @@ with tab_full:
             else:
                 st.info("Sélectionne au moins une valeur.")
     else:
-        st.info("Aucune valeur dans la liste filtrée actuelle.")
+        st.info("Aucune valeur disponible dans la sélection filtrée.")
 
     st.divider()
 
