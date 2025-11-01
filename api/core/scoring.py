@@ -140,8 +140,20 @@ def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
     # 2) Ne garder que OHLCV & caster en numérique
     cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
     x = x[cols].copy().sort_index()
-    for c in x.columns:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    # Coalescer chaque champ OHLCV en une Series numérique unique
+    fixed: Dict[str, pd.Series] = {}
+    for c in cols:
+        obj = x[c]
+        if isinstance(obj, pd.DataFrame):
+            best = obj.count().idxmax()
+            ser = obj[best]
+        else:
+            ser = obj
+        ser = pd.to_numeric(ser, errors="coerce").astype(float)
+        fixed[c] = ser
+
+    x = pd.DataFrame(fixed).sort_index()
 
     if "Close" not in x.columns:
         return pd.DataFrame()
