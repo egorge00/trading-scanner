@@ -361,10 +361,15 @@ def score_one(ticker: str):
 
         kpis = compute_kpis(df)
         cs = compute_score(df)
-        if isinstance(cs, (list, tuple)) and len(cs) >= 2:
-            score, action = cs[0], cs[1]
+        score = None
+        signal_code = None
+        if isinstance(cs, (list, tuple)):
+            if len(cs) > 0:
+                score = cs[0]
+            if len(cs) > 1:
+                signal_code = cs[1]
         else:
-            score, action = cs
+            score = cs
 
         uni = load_universe_df()
         name = ""
@@ -382,8 +387,8 @@ def score_one(ticker: str):
             "Ticker": tkr,
             "Name": name,
             "Market": market,
+            "Signal": signal_code,
             "Score": float(score) if score is not None else None,
-            "Action": action,
             "RSI": float(kpis["RSI"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "RSI" in kpis else None,
             "MACD_hist": float(kpis["MACD_hist"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "MACD_hist" in kpis else None,
             "%toHH52": float(kpis["%toHH52"].iloc[-1]) if isinstance(kpis, pd.DataFrame) and "%toHH52" in kpis else None,
@@ -473,7 +478,7 @@ def signal_for_ticker(ticker: str) -> tuple[str, float] | None:
     res = score_one(ticker)
     if not isinstance(res, dict) or res.get("error"):
         return None
-    return res.get("Action", ""), float(res.get("Score", 0))
+    return res.get("Signal", ""), float(res.get("Score", 0))
 
 
 # ===== Normalisation / Validation des tickers =====
@@ -566,12 +571,12 @@ with tab_scan:
             df_out = (pd.DataFrame(rows)
                       .sort_values(by=["Score","Ticker"], ascending=[False, True])
                       .reset_index(drop=True))
-            cols = ["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
+            cols = ["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20","Close>SMA50","SMA50>SMA200"]
             df_out = df_out[[c for c in cols if c in df_out.columns]]
             st.dataframe(df_out, use_container_width=True)
 
             st.markdown("**Top 10 opportunités 🟢**")
-            st.dataframe(df_out.head(10)[["Ticker","Name","Score","Action","RSI","MACD_hist","%toHH52","VolZ20"]],
+            st.dataframe(df_out.head(10)[["Ticker","Name","Score","Signal","RSI","MACD_hist","%toHH52","VolZ20"]],
                          use_container_width=True)
 
             st.markdown("### 🗑️ Supprimer une valeur depuis les résultats")
@@ -670,16 +675,16 @@ with tab_single:
                 kpis = compute_kpis(df)
                 cs = compute_score(df)
                 score = np.nan
-                action = None
+                signal = None
                 details: dict[str, object] = {}
                 if isinstance(cs, (list, tuple)):
                     score = cs[0] if len(cs) >= 1 else np.nan
-                    action = cs[1] if len(cs) >= 2 else None
+                    signal = cs[1] if len(cs) >= 2 else None
                     if len(cs) >= 3 and isinstance(cs[2], dict):
                         details = cs[2]
                 else:
                     score = cs
-                st.subheader(f"{ticker_input} — Score: {score:.2f} | Action: {action}")
+                st.subheader(f"{ticker_input} — Score: {score:.2f} | Signal: {signal}")
                 last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -801,7 +806,7 @@ with tab_full:
                     "SELL": "🔴 SELL",
                 }.get(a, a)
 
-            out["Signal"] = out["Action"].map(to_signal)
+            out["Signal"] = out["Signal"].map(to_signal)
 
             # --- Sauvegarde journalière ---
             today = dt.date.today().strftime("%Y-%m-%d")
@@ -847,21 +852,7 @@ with tab_full:
             except Exception as e:
                 st.warning(f"Comparaison classement vs veille impossible: {e}")
 
-            cols = [
-                "Ticker",
-                "Name",
-                "Market",
-                "Signal",
-                "Score",
-                "Trend",
-                "RSI",
-                "MACD_hist",
-                "%toHH52",
-                "VolZ20",
-                "Action",
-                "Close>SMA50",
-                "SMA50>SMA200",
-            ]
+            cols = ["Ticker", "Name", "Market", "Signal", "Score", "RSI", "MACD_hist", "%toHH52", "VolZ20"]
             out = out[[c for c in cols if c in out.columns]]
 
             meta = save_full_scan_cache(out, sel_markets, query, int(limit))
@@ -1003,7 +994,7 @@ with tab_full:
                 "Ticker",
                 "Name",
                 "Score",
-                "Action",
+                "Signal",
                 "RSI",
                 "MACD_hist",
                 "%toHH52",
@@ -1020,7 +1011,7 @@ with tab_full:
                 with c1:
                     st.write(f"**{r['Ticker']}** — {r.get('Name', '')}")
                 with c2:
-                    st.write(f"Score: {r['Score']} | Action: {r['Action']}")
+                    st.write(f"Score: {r['Score']} | Signal: {r.get('Signal', '')}")
                 with c3:
                     if st.button("🗑️", key=f"full_wl_del_{i}_{r['Ticker']}"):
                         wl = load_full_scan_watchlist()
