@@ -448,23 +448,103 @@ def compute_score(df: pd.DataFrame):
 # --- INVESTOR PROFILE (weekly KPIs & LT score) ---
 
 
-def _resample_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample daily OHLCV to weekly (Fri close), robust."""
+def _ensure_ohlcv_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplati yfinance, garde OHLCV numériques, index DateTime trié et tz-naive."""
+
+    if df is None or df.empty:
+        return pd.DataFrame()
 
     x = df.copy()
-    need = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
-    if not need:
+
+    # Aplatir MultiIndex éventuel
+    if isinstance(x.columns, pd.MultiIndex):
+        lvl0 = x.columns.get_level_values(0)
+        keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
+        if keep:
+            x = x[keep]
+            if isinstance(x.columns, pd.MultiIndex):
+                x.columns = [c[0] if isinstance(c, tuple) else c for c in x.columns]
+        else:
+            x = x.droplevel(-1, axis=1)
+
+    # Garde OHLCV si présents
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
+    x = x[cols].copy()
+
+    # Index -> DateTimeIndex trié, tz-naive
+    if not isinstance(x.index, pd.DatetimeIndex):
+        x.index = pd.to_datetime(x.index, errors="coerce")
+    x = x[~x.index.isna()].sort_index()
+    try:
+        if x.index.tz is not None:
+            x.index = x.index.tz_localize(None)
+    except Exception:
+        pass
+
+    # Cast numérique
+    for c in x.columns:
+        x[c] = pd.to_numeric(x[c], errors="coerce").astype(float)
+
+    return x
+
+
+def _resample_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample daily OHLCV to weekly (Fri close) de façon ultra-robuste.
+    - Open: last
+    - High: max
+    - Low:  min
+    - Close: last
+    - Volume: sum
+    Retourne un DataFrame plat OHLCV hebdo, ou vide si rien d'exploitable.
+    """
+
+    x = _ensure_ohlcv_df(df)
+    if x.empty:
         return pd.DataFrame()
-    x = x[need].sort_index()
-    w = pd.DataFrame(
-        {
-            "Open": x["Open"].resample("W-FRI").last(),
-            "High": x["High"].resample("W-FRI").max(),
-            "Low": x["Low"].resample("W-FRI").min(),
-            "Close": x["Close"].resample("W-FRI").last(),
-            "Volume": x["Volume"].resample("W-FRI").sum(),
-        }
-    ).dropna(subset=["Close"])
+
+    # Pour chaque colonne dispo, on résample séparément pour éviter tout scalaire
+    def _res_last(name):
+        return x[name].resample("W-FRI").last() if name in x.columns else pd.Series(dtype=float)
+
+    def _res_max(name):
+        return x[name].resample("W-FRI").max() if name in x.columns else pd.Series(dtype=float)
+
+    def _res_min(name):
+        return x[name].resample("W-FRI").min() if name in x.columns else pd.Series(dtype=float)
+
+    def _res_sum(name):
+        return x[name].resample("W-FRI").sum() if name in x.columns else pd.Series(dtype=float)
+
+    open_w = _res_last("Open")
+    high_w = _res_max("High")
+    low_w = _res_min("Low")
+    close_w = _res_last("Close")
+    vol_w = _res_sum("Volume")
+
+    # Concat sûre (Series → jamais scalaire), colonnes nommées
+    parts = []
+    if not open_w.empty:
+        parts.append(open_w.rename("Open"))
+    if not high_w.empty:
+        parts.append(high_w.rename("High"))
+    if not low_w.empty:
+        parts.append(low_w.rename("Low"))
+    if not close_w.empty:
+        parts.append(close_w.rename("Close"))
+    if not vol_w.empty:
+        parts.append(vol_w.rename("Volume"))
+
+    if not parts:
+        return pd.DataFrame()
+
+    w = pd.concat(parts, axis=1)
+
+    # Nettoyage final
+    if "Close" not in w.columns or w["Close"].dropna().empty:
+        return pd.DataFrame()
+    w = w.dropna(subset=["Close"]).sort_index()
+
     return w
 
 
