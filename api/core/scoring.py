@@ -116,69 +116,94 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
 
 
 def compute_kpis(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the indicator panel required for scoring.
+    """
+    Calcule un panneau d'indicateurs nettoyés et alignés sur l'index fourni.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        OHLCV dataframe (daily) with columns Open, High, Low, Close, Volume.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame aligned on the input index including, at minimum, the columns
-        Close, RSI, MACD_hist, SMA50, SMA200, BBP, VolZ20, pct_to_HH52, ADX,
-        and MR (mean-reversion z-score).
+    Cette implémentation aplatit un éventuel MultiIndex (typiquement issu de
+    yfinance), force les colonnes OHLCV à être numériques et garantit que la
+    clôture est manipulée sous forme de série float strictement ordonnée.
     """
 
     if df is None or df.empty:
-        return pd.DataFrame(columns=[
-            "Close",
-            "RSI",
-            "MACD",
-            "MACD_signal",
-            "MACD_hist",
-            "SMA50",
-            "SMA200",
-            "BBP",
-            "VolZ20",
-            "pct_to_HH52",
-            "ADX",
-            "MR",
-        ])
+        return pd.DataFrame()
 
-    data = df.copy()
-    data = data.sort_index()
+    x = df.copy()
 
-    close = pd.to_numeric(data.get("Close"), errors="coerce")
-    high = pd.to_numeric(data.get("High"), errors="coerce")
-    low = pd.to_numeric(data.get("Low"), errors="coerce")
-    volume = pd.to_numeric(data.get("Volume"), errors="coerce") if "Volume" in data else pd.Series(index=data.index, dtype="float64")
+    if isinstance(x.columns, pd.MultiIndex):
+        lvl0 = x.columns.get_level_values(0)
+        keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in set(lvl0)]
+        if keep:
+            x = x[keep]
+            if isinstance(x.columns, pd.MultiIndex):
+                x.columns = [c[0] if isinstance(c, tuple) else c for c in x.columns]
+        else:
+            x = x.droplevel(-1, axis=1)
 
-    rsi = _rsi_ema(close)
-    macd_line, macd_signal, macd_hist = _macd(close)
-    sma50 = _sma(close, 50)
-    sma200 = _sma(close, 200)
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in x.columns]
+    x = x[cols].copy()
+
+    x = x.sort_index()
+    for c in x.columns:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    if "Close" not in x.columns:
+        return pd.DataFrame()
+
+    close = x["Close"].astype(float)
+    high = x["High"].astype(float) if "High" in x.columns else pd.Series(index=close.index, dtype=float)
+    low = x["Low"].astype(float) if "Low" in x.columns else pd.Series(index=close.index, dtype=float)
+    vol = x["Volume"].astype(float) if "Volume" in x.columns else pd.Series(index=close.index, dtype=float)
+
+    delta = close.diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    roll_up = up.ewm(span=14, adjust=False, min_periods=5).mean()
+    roll_down = down.ewm(span=14, adjust=False, min_periods=5).mean()
+    rs = roll_up / roll_down
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+
+    ema12 = close.ewm(span=12, adjust=False, min_periods=6).mean()
+    ema26 = close.ewm(span=26, adjust=False, min_periods=13).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False, min_periods=5).mean()
+    macd_hist = macd - macd_signal
+
+    sma50 = close.rolling(50, min_periods=25).mean()
+    sma200 = close.rolling(200, min_periods=50).mean()
+
+    hh52 = close.rolling(252, min_periods=60).max()
+    pct_to_hh52 = close / hh52 - 1.0
+
+    if vol.notna().any():
+        vma20 = vol.rolling(20, min_periods=10).mean()
+        vstd20 = vol.rolling(20, min_periods=10).std(ddof=0)
+        volz20 = (vol - vma20) / vstd20
+    else:
+        volz20 = pd.Series(index=close.index, dtype=float)
+    volz20 = volz20.replace([np.inf, -np.inf], np.nan)
+
     bbp = _bollinger_bbp(close)
-    volz = _volume_z(volume)
-    pct_to_hh52 = _pct_to_hh52(close)
-    adx = _adx(high, low, close)
+    adx = _adx(high, low, close) if "High" in x.columns and "Low" in x.columns else pd.Series(index=close.index, dtype=float)
     mr = _mean_reversion_score(close)
 
-    out = pd.DataFrame({
-        "Close": close,
-        "RSI": rsi,
-        "MACD": macd_line,
-        "MACD_signal": macd_signal,
-        "MACD_hist": macd_hist,
-        "SMA50": sma50,
-        "SMA200": sma200,
-        "BBP": bbp,
-        "VolZ20": volz,
-        "pct_to_HH52": pct_to_hh52,
-        "ADX": adx,
-        "MR": mr,
-    })
+    out = pd.DataFrame(
+        {
+            "Close": close,
+            "RSI": rsi,
+            "MACD": macd,
+            "MACD_signal": macd_signal,
+            "MACD_hist": macd_hist,
+            "SMA50": sma50,
+            "SMA200": sma200,
+            "BBP": bbp,
+            "VolZ20": volz20,
+            "pct_to_HH52": pct_to_hh52,
+            "%toHH52": pct_to_hh52,
+            "ADX": adx,
+            "MR": mr,
+        },
+        index=close.index,
+    )
 
     return out
 
@@ -187,7 +212,8 @@ def _dynamic_weights(rv: float | pd.Series | None) -> Tuple[Dict[str, float], fl
     """Allocate dynamic weights between momentum and mean-reversion blocks."""
 
     if isinstance(rv, pd.Series):
-        rv_value = float(rv.iloc[-1]) if not rv.empty else float("nan")
+        rv_clean = rv.dropna()
+        rv_value = float(rv_clean.iloc[-1]) if not rv_clean.empty else float("nan")
     elif rv is None:
         rv_value = float("nan")
     else:
@@ -376,7 +402,8 @@ def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
     score_final = float(np.clip(score_smooth * 5.0, -5.0, 5.0))
     score_final = round(score_final, 2)
 
-    rv_latest = float(rv_series.iloc[-1]) if len(rv_series) else np.nan
+    rv_series_clean = rv_series.dropna()
+    rv_latest = float(rv_series_clean.iloc[-1]) if not rv_series_clean.empty else np.nan
     weights_latest, wmom, wmr = _dynamic_weights(rv_latest)
     subscores_latest = _compute_subscores(kpis.iloc[-1])
     score_norm_latest, normalized_weights = _aggregate_score(subscores_latest, weights_latest)
@@ -408,13 +435,10 @@ def compute_score(df: pd.DataFrame) -> Tuple[float, str, Dict[str, object]]:
     weights_details["wmom"] = wmom
     weights_details["wmr"] = wmr
 
-    close_above_latest = (
-        kpis["close_above_sma50"].iloc[-1]
-        if "close_above_sma50" in kpis.columns and not kpis.empty
-        else np.nan
-    )
-    if pd.notna(close_above_latest):
-        close_above_latest = int(close_above_latest)
+    if "close_above_sma50" in kpis.columns and kpis["close_above_sma50"].notna().any():
+        close_above_latest = int(kpis["close_above_sma50"].dropna().iloc[-1])
+    else:
+        close_above_latest = np.nan
 
     details = {
         "RSI": subscores_latest.get("RSI"),
