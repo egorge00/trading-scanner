@@ -7,6 +7,7 @@ import datetime as dt
 import base64
 import json
 import bcrypt
+import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -303,19 +304,21 @@ def score_one(ticker: str):
     if df is None:
         return None
     try:
-        k = compute_kpis(df)
-        s = compute_score(k)
+        kpis = compute_kpis(df)
+        score, action, details = compute_score(df)
+        last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
         return {
             "Ticker": ticker,
             "Name": get_name_for_ticker(ticker),
-            "Score": s.score,
-            "Action": s.action,
-            "RSI": round(k.rsi, 1),
-            "MACD_hist": round(k.macd_hist, 3),
-            "Close>SMA50": "✅" if k.close_above_sma50 else "❌",
-            "SMA50>SMA200": "✅" if k.sma50_above_sma200 else "❌",
-            "%toHH52": round(k.pct_to_hh52 * 100, 2),
-            "VolZ20": round(k.vol_z20, 2),
+            "Score": float(score),
+            "Action": action,
+            "RSI": round(float(last.get("RSI", np.nan)), 1) if not kpis.empty else np.nan,
+            "MACD_hist": round(float(last.get("MACD_hist", np.nan)), 3) if not kpis.empty else np.nan,
+            "Close>SMA50": "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
+            "SMA50>SMA200": "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
+            "%toHH52": round(float(last.get("pct_to_HH52", np.nan)) * 100, 2) if not kpis.empty else np.nan,
+            "VolZ20": round(float(last.get("VolZ20", np.nan)), 2) if not kpis.empty else np.nan,
+            "Upside": details.get("p_up", np.nan),
         }
     except Exception:
         return None
@@ -513,18 +516,28 @@ with tab_single:
                 st.warning("Pas de données utilisables.")
             else:
                 kpis = compute_kpis(df)
-                score = compute_score(kpis)
-                st.subheader(f"{ticker_input} — Score: {score.score} | Action: {score.action}")
+                score, action, details = compute_score(df)
+                st.subheader(f"{ticker_input} — Score: {score:.2f} | Action: {action}")
+                last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("RSI(14)", f"{kpis.rsi:.1f}")
-                    st.metric("MACD hist", f"{kpis.macd_hist:.3f}")
+                    st.metric("RSI(14)", f"{float(last.get('RSI', np.nan)):.1f}" if not kpis.empty else "–")
+                    st.metric("MACD hist", f"{float(last.get('MACD_hist', np.nan)):.3f}" if not kpis.empty else "–")
                 with col2:
-                    st.metric("Close > SMA50", "✅" if kpis.close_above_sma50 else "❌")
-                    st.metric("SMA50 > SMA200", "✅" if kpis.sma50_above_sma200 else "❌")
+                    st.metric(
+                        "Close > SMA50",
+                        "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
+                    )
+                    st.metric(
+                        "SMA50 > SMA200",
+                        "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
+                    )
                 with col3:
-                    st.metric("% to 52w High", f"{kpis.pct_to_hh52*100:.2f}%")
-                    st.metric("Vol Z20", f"{kpis.vol_z20:.2f}")
+                    pct_hh = float(last.get("pct_to_HH52", np.nan)) * 100 if not kpis.empty else np.nan
+                    st.metric("% to 52w High", f"{pct_hh:.2f}%" if not np.isnan(pct_hh) else "–")
+                    volz = float(last.get("VolZ20", np.nan)) if not kpis.empty else np.nan
+                    st.metric("Vol Z20", f"{volz:.2f}" if not np.isnan(volz) else "–")
+                st.caption(f"Probabilité d'upside 5j: {details.get('p_up', np.nan):.2%}")
                 st.line_chart(df[["Close"]])
         except Exception as e:
             st.error(f"Erreur : {e}")
