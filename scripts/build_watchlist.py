@@ -5,6 +5,63 @@ import typing as t
 import pandas as pd
 import requests
 
+ETF_STATIC = [
+    # --- US Broad & Style ---
+    {"isin": "", "ticker": "SPY", "name": "SPDR S&P 500", "market": "ETF"},
+    {"isin": "", "ticker": "IVV", "name": "iShares Core S&P 500", "market": "ETF"},
+    {"isin": "", "ticker": "VOO", "name": "Vanguard S&P 500", "market": "ETF"},
+    {"isin": "", "ticker": "VTI", "name": "Vanguard Total Stock Market", "market": "ETF"},
+    {"isin": "", "ticker": "QQQ", "name": "Invesco QQQ Trust", "market": "ETF"},
+    {"isin": "", "ticker": "IWM", "name": "iShares Russell 2000", "market": "ETF"},
+    {"isin": "", "ticker": "DIA", "name": "SPDR Dow Jones Industrial Average", "market": "ETF"},
+    {"isin": "", "ticker": "MTUM", "name": "iShares MSCI USA Momentum", "market": "ETF"},
+    {"isin": "", "ticker": "QUAL", "name": "iShares MSCI USA Quality", "market": "ETF"},
+    {"isin": "", "ticker": "VLUE", "name": "iShares MSCI USA Value Factor", "market": "ETF"},
+    {"isin": "", "ticker": "SIZE", "name": "iShares MSCI USA Size Factor", "market": "ETF"},
+
+    # --- US Sectors (SPDR) ---
+    {"isin": "", "ticker": "XLK", "name": "Technology Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLY", "name": "Consumer Discretionary Select SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLP", "name": "Consumer Staples Select SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLE", "name": "Energy Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLF", "name": "Financial Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLV", "name": "Health Care Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLI", "name": "Industrial Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLU", "name": "Utilities Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLB", "name": "Materials Select Sector SPDR", "market": "ETF"},
+    {"isin": "", "ticker": "XLRE", "name": "Real Estate Select Sector SPDR", "market": "ETF"},
+
+    # --- US Bonds / Gold / Others ---
+    {"isin": "", "ticker": "LQD", "name": "iShares iBoxx $ Inv Grade Corporate Bd", "market": "ETF"},
+    {"isin": "", "ticker": "HYG", "name": "iShares iBoxx $ High Yield Corporate", "market": "ETF"},
+    {"isin": "", "ticker": "TLT", "name": "iShares 20+ Year Treasury", "market": "ETF"},
+    {"isin": "", "ticker": "IEF", "name": "iShares 7-10 Year Treasury", "market": "ETF"},
+    {"isin": "", "ticker": "SHY", "name": "iShares 1-3 Year Treasury", "market": "ETF"},
+    {"isin": "", "ticker": "GLD", "name": "SPDR Gold Shares", "market": "ETF"},
+    {"isin": "", "ticker": "IAU", "name": "iShares Gold Trust", "market": "ETF"},
+    {"isin": "", "ticker": "SLV", "name": "iShares Silver Trust", "market": "ETF"},
+    {"isin": "", "ticker": "USO", "name": "United States Oil", "market": "ETF"},
+
+    # --- Global / International (US listings) ---
+    {"isin": "", "ticker": "VEA", "name": "Vanguard FTSE Developed Markets", "market": "ETF"},
+    {"isin": "", "ticker": "VWO", "name": "Vanguard FTSE Emerging Markets", "market": "ETF"},
+    {"isin": "", "ticker": "IEFA", "name": "iShares Core MSCI EAFE", "market": "ETF"},
+    {"isin": "", "ticker": "IEMG", "name": "iShares Core MSCI Emerging Markets", "market": "ETF"},
+    {"isin": "", "ticker": "VT", "name": "Vanguard Total World Stock", "market": "ETF"},
+
+    # --- Europe-domiciled UCITS (Yahoo suffix .L/.DE/.AS...) ---
+    {"isin": "", "ticker": "CSPX.L", "name": "iShares Core S&P 500 UCITS (GBP) Acc", "market": "ETF"},
+    {"isin": "", "ticker": "SXR8.DE", "name": "iShares Core S&P 500 UCITS (EUR) Acc", "market": "ETF"},
+    {"isin": "", "ticker": "VUAA.AS", "name": "Vanguard S&P 500 UCITS (EUR) Acc", "market": "ETF"},
+    {"isin": "", "ticker": "VWCE.DE", "name": "Vanguard FTSE All-World UCITS (EUR) Acc", "market": "ETF"},
+    {"isin": "", "ticker": "EQQQ.L", "name": "Invesco EQQQ NASDAQ-100 UCITS (GBP)", "market": "ETF"},
+    {"isin": "", "ticker": "IUSA.L", "name": "iShares S&P 500 UCITS (GBP) Dist", "market": "ETF"},
+    {"isin": "", "ticker": "XD9U.DE", "name": "Xtrackers MSCI USA UCITS (EUR) Acc", "market": "ETF"},
+    {"isin": "", "ticker": "VUKE.L", "name": "Vanguard FTSE 100 UCITS (GBP) Dist", "market": "ETF"},
+    {"isin": "", "ticker": "IMEU.L", "name": "iShares Core MSCI Europe UCITS (GBP)", "market": "ETF"},
+    {"isin": "", "ticker": "EIMI.L", "name": "iShares Core MSCI EM IMI UCITS (GBP)", "market": "ETF"},
+]
+
 W_SNP = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 W_CAC = "https://en.wikipedia.org/wiki/CAC_40"
 W_ESTOXX = "https://en.wikipedia.org/wiki/EURO_STOXX_50"
@@ -193,36 +250,43 @@ def main():
         except Exception as e:
             print(f"[ERROR] {label} failed: {e}")
 
-    all_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["isin","ticker","name","market"])
-    # Nettoyage & dédup
-    for c in ("isin","ticker","name","market"):
-        if c in all_df.columns:
-            all_df[c] = all_df[c].astype(str).str.strip()
-    all_df = all_df.drop_duplicates(subset=["ticker","name"]).reset_index(drop=True)
-    all_df["isin"] = all_df.get("isin", "").fillna("")
+    df_final = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["isin","ticker","name","market"])
 
-    if "ticker" in all_df.columns:
-        all_df["ticker"] = all_df["ticker"].astype(str).str.strip().str.upper()
+    # Nettoyage & dédup
+    for c in ("isin", "ticker", "name", "market"):
+        if c in df_final.columns:
+            df_final[c] = df_final[c].astype(str).str.strip()
+    if {"ticker", "name"} <= set(df_final.columns):
+        df_final = df_final.drop_duplicates(subset=["ticker", "name"]).reset_index(drop=True)
+    for col in ("isin", "ticker", "name", "market"):
+        if col not in df_final.columns:
+            df_final[col] = ""
+    df_final["isin"] = df_final["isin"].fillna("")
+    df_final["ticker"] = df_final["ticker"].fillna("").astype(str).str.strip().str.upper()
+
+    etf_df = pd.DataFrame(ETF_STATIC)
+    for c in ["isin", "ticker", "name", "market"]:
+        if c not in etf_df.columns:
+            etf_df[c] = ""
+    etf_df["isin"] = etf_df["isin"].fillna("")
+    etf_df["ticker"] = etf_df["ticker"].astype(str).str.strip().str.upper()
+    etf_df["name"] = etf_df["name"].astype(str)
+    etf_df["market"] = "ETF"
 
     # --- Exclusion manuelle de tickers problématiques ---
     EXCLUDE_TICKERS = {"BRK.B", "BRO", "BF.B"}
-    if "ticker" in all_df.columns:
-        all_df = all_df[~all_df["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
-    if "isin" in all_df.columns:
-        all_df = all_df[~all_df["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+    df_final = df_final[~df_final["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+    df_final = df_final[~df_final["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+    etf_df = etf_df[~etf_df["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
+    etf_df = etf_df[~etf_df["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
 
-    all_df.to_csv("data/watchlist.csv", index=False)
-    print(f"[DONE] data/watchlist.csv écrit ({len(all_df)} lignes)")
-    # Nettoyage manuel du fichier existant (si déjà commité)
-    try:
-        csv_path = "data/watchlist.csv"
-        w = pd.read_csv(csv_path)
-        w = w[~w["ticker"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
-        w = w[~w["isin"].isin(EXCLUDE_TICKERS)].reset_index(drop=True)
-        w.to_csv(csv_path, index=False)
-        print(f"✅ Nettoyage terminé : {len(w)} lignes conservées dans {csv_path}")
-    except Exception as e:
-        print(f"⚠️ Impossible de nettoyer le fichier watchlist.csv : {e}")
+    keep_cols = ["isin", "ticker", "name", "market"]
+    df_final = pd.concat([df_final[keep_cols], etf_df[keep_cols]], ignore_index=True)
+    df_final = df_final.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
+
+    csv_path = "data/watchlist.csv"
+    df_final.to_csv(csv_path, index=False)
+    print(f"✅ watchlist.csv mis à jour : {len(df_final)} lignes (incl. ETF)")
     # On sort avec code 0 même si des sources manquent, pour éviter l'échec du job
     sys.exit(0)
 
