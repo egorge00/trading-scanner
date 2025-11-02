@@ -52,16 +52,20 @@ def compute_fscore_basic(metrics: dict) -> tuple[float, dict]:
     roe = metrics.get("roe")
     dte = metrics.get("debt_to_equity")
 
+    PM_MIN = 0.12
+    ROE_MIN = 0.12
+    DTE_MAX = 150.0
+
     pts = 0
     if (epsg is not None) and (epsg > 0):
         pts += 1
     if (rg is not None) and (rg > 0):
         pts += 1
-    if (pm is not None) and (pm > 0.10):
+    if (pm is not None) and (pm >= PM_MIN):
         pts += 1
-    if (roe is not None) and (roe > 0.10):
+    if (roe is not None) and (roe >= ROE_MIN):
         pts += 1
-    if (dte is not None) and (dte < 100):
+    if (dte is not None) and (dte <= DTE_MAX):
         pts += 1
 
     raw5 = float(pts)

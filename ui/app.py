@@ -47,21 +47,36 @@ def _color_score(s: pd.Series) -> list[str]:
     return styles
 
 
-def _color_score_final(s: pd.Series) -> list[str]:
-    styles: list[str] = []
-    for v in s:
+def _style_scorefinal(series: pd.Series) -> list[str]:
+    out: list[str] = []
+    for v in series:
         try:
             x = float(v)
         except Exception:
-            styles.append("")
+            out.append("")
             continue
-        if x >= 70:
-            styles.append("background-color:#E8FAE6;")
-        elif x <= 30:
-            styles.append("background-color:#FDE8E8;")
+        if x >= 80:
+            out.append("background-color:#E8FAE6;")
+        elif x < 30:
+            out.append("background-color:#FDE8E8;")
         else:
-            styles.append("")
-    return styles
+            out.append("")
+    return out
+
+
+def signal_from_scorefinal(sf: float | None) -> str:
+    if sf is None:
+        return "⚪ HOLD"
+    s = float(sf)
+    if s >= 80:
+        return "🟢 BUY"
+    if s >= 65:
+        return "🟡 WATCH"
+    if s >= 45:
+        return "⚪ HOLD"
+    if s >= 30:
+        return "🔵 REDUCE"
+    return "🔴 SELL"
 
 
 def _today_paris_str() -> str:
@@ -130,26 +145,6 @@ def fmt_earnings(date_iso: str | None, days_to: int | None) -> str:
         return f"{date_iso} (J-{days_to}) 📣"
     return f"{date_iso} (J-{days_to})"
 
-
-def format_signal_from_score(score: float) -> str:
-    """
-    Map le score [-5,5] -> label + emoji pour la colonne 'Signal'.
-    Seuils alignés sur l’ancienne logique BUY/WATCH/HOLD/REDUCE/SELL.
-    """
-
-    if score is None:
-        return "–"
-    s = float(score)
-    if s >= 3.0:
-        return "🟢 BUY"
-    elif s >= 1.5:
-        return "🟡 WATCH"
-    elif s <= -3.0:
-        return "🔴 SELL"
-    elif s <= -1.5:
-        return "🟠 REDUCE"
-    else:
-        return "⚪ HOLD"
 
 # --- rendre importable le package "api" depuis /ui ---
 ROOT = Path(__file__).resolve().parents[1]
@@ -617,8 +612,6 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     except Exception:
         pass
 
-    sig = format_signal_from_score(score)
-
     # --- FONDAMENTAUX (cache lru dans le module) ---
     fund = get_fundamentals(tkr)
     fscore100, _ = compute_fscore_basic(fund)
@@ -631,6 +624,8 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
         combo = fscore100
     else:
         combo = WEIGHT_TECH * tech100 + WEIGHT_FUND * fscore100
+
+    sig = signal_from_scorefinal(combo)
 
     # Earnings
     edate, edays = get_next_earnings(tkr)
@@ -696,19 +691,20 @@ def run_full_scan_all_and_cache(profile: str, max_workers: int = 8) -> pd.DataFr
         return pd.DataFrame()
 
     out = pd.DataFrame(rows)
-    sort_cols: list[str] = []
-    sort_asc: list[bool] = []
     if "ScoreFinal" in out.columns:
-        sort_cols.append("ScoreFinal")
-        sort_asc.append(False)
-    if "Score" in out.columns:
-        sort_cols.append("Score")
-        sort_asc.append(False)
-    if "Ticker" in out.columns:
-        sort_cols.append("Ticker")
-        sort_asc.append(True)
-    if sort_cols:
-        out = out.sort_values(by=sort_cols, ascending=sort_asc)
+        by = ["ScoreFinal"]
+        asc = [False]
+        if "Ticker" in out.columns:
+            by.append("Ticker")
+            asc.append(True)
+        out = out.sort_values(by=by, ascending=asc)
+    elif "Score" in out.columns:
+        by = ["Score"]
+        asc = [False]
+        if "Ticker" in out.columns:
+            by.append("Ticker")
+            asc.append(True)
+        out = out.sort_values(by=by, ascending=asc)
     out = out.reset_index(drop=True)
     cols = [
         "Ticker",
@@ -1348,9 +1344,19 @@ with tab_full:
                 base = view.copy()
                 view = base[(base["EarningsD"].isna()) | (base["EarningsD"] >= hide_before_n)]
             if "ScoreFinal" in view.columns:
-                view = view.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True])
+                by = ["ScoreFinal"]
+                asc = [False]
+                if "Ticker" in view.columns:
+                    by.append("Ticker")
+                    asc.append(True)
+                view = view.sort_values(by=by, ascending=asc)
             elif "Score" in view.columns:
-                view = view.sort_values(by=["Score", "Ticker"], ascending=[False, True])
+                by = ["Score"]
+                asc = [False]
+                if "Ticker" in view.columns:
+                    by.append("Ticker")
+                    asc.append(True)
+                view = view.sort_values(by=by, ascending=asc)
             view = view.head(int(limit_view)).reset_index(drop=True)
 
             cols_main = [
@@ -1361,12 +1367,19 @@ with tab_full:
                 "ScoreFinal",
                 "ScoreTech",
                 "FscoreFund",
-                "RSI",
                 "%toHH52",
                 "Earnings",
             ]
+            if profile != "Investisseur":
+                insert_at = cols_main.index("%toHH52")
+                cols_main.insert(insert_at, "RSI")
+            present = [c for c in cols_main if c in view.columns]
             display_view = rename_score_for_display(view)
-            display_cols = map_score_column(cols_main)
+            if "%toHH52" in display_view.columns:
+                display_view["%toHH52"] = (
+                    pd.to_numeric(display_view["%toHH52"], errors="coerce") * 100
+                ).round(1)
+            display_cols = map_score_column(present)
             display_cols = [c for c in display_cols if c in display_view.columns]
 
             score_col = map_score_column(["Score"])[0]
@@ -1374,7 +1387,7 @@ with tab_full:
             if not main_df.empty:
                 styled = main_df.style
                 if "ScoreFinal" in main_df.columns:
-                    styled = styled.apply(_color_score_final, subset=["ScoreFinal"])
+                    styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
                 if score_col in main_df.columns:
                     styled = styled.apply(_color_score, subset=[score_col])
                 st.dataframe(styled, use_container_width=True, height=520)
