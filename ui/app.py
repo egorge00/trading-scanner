@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 import requests
 import traceback
+import yfinance as yf
 
 
 @contextlib.contextmanager
@@ -46,6 +47,23 @@ def _color_score(s: pd.Series) -> list[str]:
     return styles
 
 
+def _color_score_final(s: pd.Series) -> list[str]:
+    styles: list[str] = []
+    for v in s:
+        try:
+            x = float(v)
+        except Exception:
+            styles.append("")
+            continue
+        if x >= 70:
+            styles.append("background-color:#E8FAE6;")
+        elif x <= 30:
+            styles.append("background-color:#FDE8E8;")
+        else:
+            styles.append("")
+    return styles
+
+
 def _today_paris_str() -> str:
     return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
 
@@ -60,6 +78,57 @@ def _daily_cache_key(profile: str) -> str:
 
 def _now_paris_iso():
     return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_next_earnings(tkr: str):
+    """Retourne (date_iso, days_to) pour la prochaine date d’earnings; ou dernière passée si aucune future.
+       None, None si introuvable."""
+    try:
+        t = yf.Ticker(tkr)
+        # API récente
+        try:
+            ed = t.get_earnings_dates(limit=12)
+            if isinstance(ed, pd.DataFrame) and not ed.empty:
+                now = pd.Timestamp(datetime.now(tz=ZoneInfo("Europe/Paris")).date())
+                ed = ed.copy()
+                ed.index = pd.to_datetime(ed.index).tz_localize(None)
+                future = ed.index[ed.index >= now]
+                d = future[0] if len(future) > 0 else ed.index.max()
+                dt_local = d.to_pydatetime().replace(tzinfo=ZoneInfo("Europe/Paris"))
+                days_to = (dt_local.date() - datetime.now(tz=ZoneInfo("Europe/Paris")).date()).days
+                return dt_local.strftime("%Y-%m-%d"), int(days_to)
+        except Exception:
+            pass
+        # Fallback: calendar
+        try:
+            cal = t.calendar
+            if cal is not None and not cal.empty:
+                for v in cal.iloc[0].values:
+                    try:
+                        candidate = pd.to_datetime(v).tz_localize(None)
+                        dt_local = candidate.to_pydatetime().replace(tzinfo=ZoneInfo("Europe/Paris"))
+                        days_to = (dt_local.date() - datetime.now(tz=ZoneInfo("Europe/Paris")).date()).days
+                        return dt_local.strftime("%Y-%m-%d"), int(days_to)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None, None
+
+
+def fmt_earnings(date_iso: str | None, days_to: int | None) -> str:
+    if not date_iso or days_to is None:
+        return "—"
+    if days_to < 0:
+        return f"{date_iso} (J{days_to})"
+    if days_to == 0:
+        return f"{date_iso} (J0) 📣"
+    if days_to <= 7:
+        return f"{date_iso} (J-{days_to}) 📣"
+    return f"{date_iso} (J-{days_to})"
 
 
 def format_signal_from_score(score: float) -> str:
@@ -99,6 +168,10 @@ from api.core.scoring import (  # noqa: E402
     compute_kpis_investor,
     compute_score,
     compute_score_investor,
+)
+from api.core.fundamentals import (  # noqa: E402
+    compute_fscore_basic,
+    get_fundamentals,
 )
 
 # --- Normalisation marchés ---
@@ -442,8 +515,6 @@ def safe_yf_download(tkr: str, period="9mo", interval="1d") -> pd.DataFrame:
     3) fallback avec auto_adjust=True
     Retourne un DF plat avec colonnes OHLCV si dispo, sinon DF vide.
     """
-    import yfinance as yf
-
     # Tentative 1 : download threads=False
     try:
         df = yf.download(
@@ -548,16 +619,39 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
 
     sig = format_signal_from_score(score)
 
+    # --- FONDAMENTAUX (cache lru dans le module) ---
+    fund = get_fundamentals(tkr)
+    fscore100, _ = compute_fscore_basic(fund)
+
+    raw_score = float(score) if score is not None else None
+    tech100 = None if raw_score is None or np.isnan(raw_score) else max(0.0, min(100.0, (raw_score + 5.0) * 10.0))
+    WEIGHT_TECH = 0.7
+    WEIGHT_FUND = 0.3
+    if tech100 is None or np.isnan(tech100):
+        combo = fscore100
+    else:
+        combo = WEIGHT_TECH * tech100 + WEIGHT_FUND * fscore100
+
+    # Earnings
+    edate, edays = get_next_earnings(tkr)
+    earn_str = fmt_earnings(edate, edays)
+
     return {
         "Ticker": tkr,
         "Name": name,
         "Market": market,
         "Signal": sig,
-        "Score": float(score) if score is not None else None,
+        "Score": raw_score,
+        "ScoreTech": round(tech100, 1) if tech100 is not None and not np.isnan(tech100) else None,
+        "FscoreFund": round(fscore100, 1) if fscore100 is not None and not np.isnan(fscore100) else None,
+        "ScoreFinal": round(combo, 1) if combo is not None and not np.isnan(combo) else None,
         "RSI": rsi_val,
         "MACD_hist": macd_h,
         "%toHH52": pct_hh,
         "VolZ20": volz20,
+        "Earnings": earn_str,
+        "EarningsDate": edate,
+        "EarningsD": edays,
     }
 
 
@@ -601,21 +695,37 @@ def run_full_scan_all_and_cache(profile: str, max_workers: int = 8) -> pd.DataFr
     if not rows:
         return pd.DataFrame()
 
-    out = (
-        pd.DataFrame(rows)
-        .sort_values(by=["Score", "Ticker"], ascending=[False, True])
-        .reset_index(drop=True)
-    )
+    out = pd.DataFrame(rows)
+    sort_cols: list[str] = []
+    sort_asc: list[bool] = []
+    if "ScoreFinal" in out.columns:
+        sort_cols.append("ScoreFinal")
+        sort_asc.append(False)
+    if "Score" in out.columns:
+        sort_cols.append("Score")
+        sort_asc.append(False)
+    if "Ticker" in out.columns:
+        sort_cols.append("Ticker")
+        sort_asc.append(True)
+    if sort_cols:
+        out = out.sort_values(by=sort_cols, ascending=sort_asc)
+    out = out.reset_index(drop=True)
     cols = [
         "Ticker",
         "Name",
         "Market",
         "Signal",
         "Score",
+        "ScoreTech",
+        "FscoreFund",
+        "ScoreFinal",
         "RSI",
         "MACD_hist",
         "%toHH52",
         "VolZ20",
+        "Earnings",
+        "EarningsDate",
+        "EarningsD",
     ]
     out = out[[c for c in cols if c in out.columns]]
 
@@ -1144,9 +1254,10 @@ with tab_full:
         unsafe_allow_html=True,
     )
 
+    hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
     with card("🔧 Panneau de contrôle"):
-        c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+        c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 1])
         with c1:
             selected_markets = st.multiselect(
                 "Marchés",
@@ -1159,8 +1270,15 @@ with tab_full:
                 "Limite d’affichage", min_value=50, max_value=1500, value=1000, step=50
             )
         with c3:
-            do_scan = st.button("🚀 Lancer le scan complet", use_container_width=True)
+            hide_before_n = st.selectbox(
+                "Masquer si earnings < N jours",
+                [0, 1, 2, 3, 5, 7, 14],
+                index=0,
+                help="0 = ne rien masquer",
+            )
         with c4:
+            do_scan = st.button("🚀 Lancer le scan complet", use_container_width=True)
+        with c5:
             refresh = st.button(
                 "🔄 Rafraîchir (remplacer le cache)", use_container_width=True
             )
@@ -1188,10 +1306,16 @@ with tab_full:
             "Market",
             "Signal",
             "Score",
+            "ScoreTech",
+            "FscoreFund",
+            "ScoreFinal",
             "RSI",
             "MACD_hist",
             "%toHH52",
             "VolZ20",
+            "Earnings",
+            "EarningsDate",
+            "EarningsD",
         ]
         out = out[[c for c in need_cols if c in out.columns]]
         if "Market" in out.columns:
@@ -1204,8 +1328,8 @@ with tab_full:
             hold = sig_series.str.contains("HOLD").mean() * 100 if not out.empty else 0.0
             sell = sig_series.str.contains("SELL").mean() * 100 if not out.empty else 0.0
             avg_score = (
-                out["Score"].mean()
-                if "Score" in out.columns and not out["Score"].isna().all()
+                out["ScoreFinal"].mean()
+                if "ScoreFinal" in out.columns and not out["ScoreFinal"].isna().all()
                 else float("nan")
             )
             st.info(
@@ -1220,19 +1344,39 @@ with tab_full:
                 if selected
                 else out.copy()
             )
-            if "Score" in view.columns:
+            if "EarningsD" in meta.get("df", pd.DataFrame()).columns and hide_before_n and hide_before_n > 0:
+                base = view.copy()
+                view = base[(base["EarningsD"].isna()) | (base["EarningsD"] >= hide_before_n)]
+            if "ScoreFinal" in view.columns:
+                view = view.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True])
+            elif "Score" in view.columns:
                 view = view.sort_values(by=["Score", "Ticker"], ascending=[False, True])
             view = view.head(int(limit_view)).reset_index(drop=True)
 
-            cols_main = ["Ticker", "Name", "Market", "Signal", "Score", "RSI", "%toHH52"]
+            cols_main = [
+                "Ticker",
+                "Name",
+                "Market",
+                "Signal",
+                "ScoreFinal",
+                "ScoreTech",
+                "FscoreFund",
+                "RSI",
+                "%toHH52",
+                "Earnings",
+            ]
             display_view = rename_score_for_display(view)
             display_cols = map_score_column(cols_main)
             display_cols = [c for c in display_cols if c in display_view.columns]
 
             score_col = map_score_column(["Score"])[0]
             main_df = display_view[display_cols]
-            if score_col in main_df.columns:
-                styled = main_df.style.apply(_color_score, subset=[score_col])
+            if not main_df.empty:
+                styled = main_df.style
+                if "ScoreFinal" in main_df.columns:
+                    styled = styled.apply(_color_score_final, subset=["ScoreFinal"])
+                if score_col in main_df.columns:
+                    styled = styled.apply(_color_score, subset=[score_col])
                 st.dataframe(styled, use_container_width=True, height=520)
             else:
                 st.dataframe(main_df, use_container_width=True, height=520)
