@@ -95,6 +95,16 @@ def _now_paris_iso():
     return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+@st.cache_data(ttl=60 * 60 * 26, show_spinner=False)
+def _compute_daily_scan_cached(profile: str, date_key: str) -> pd.DataFrame:
+    """Calcule le scan complet et le renvoie (cache persistant ~1 jour)."""
+
+    # date_key fait partie de la clé de cache pour invalider chaque jour
+    _ = date_key
+    df = run_full_scan_all_and_cache(profile)
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_next_earnings(tkr: str):
     """Retourne (date_iso, days_to) pour la prochaine date d’earnings; ou dernière passée si aucune future.
@@ -631,15 +641,29 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     edate, edays = get_next_earnings(tkr)
     earn_str = fmt_earnings(edate, edays)
 
+    # -- ARRONDIS (2 décimales)
+    def _r2(x):
+        try:
+            val = round(float(x), 2)
+            if np.isnan(val):
+                return None
+            return val
+        except Exception:
+            return None
+
+    score_final_2 = _r2(combo) if "combo" in locals() else None
+    score_tech_2 = _r2(tech100) if "tech100" in locals() else None
+    fscore_fund_2 = _r2(fscore100) if "fscore100" in locals() else None
+
     return {
         "Ticker": tkr,
         "Name": name,
         "Market": market,
         "Signal": sig,
         "Score": raw_score,
-        "ScoreTech": round(tech100, 1) if tech100 is not None and not np.isnan(tech100) else None,
-        "FscoreFund": round(fscore100, 1) if fscore100 is not None and not np.isnan(fscore100) else None,
-        "ScoreFinal": round(combo, 1) if combo is not None and not np.isnan(combo) else None,
+        "ScoreTech": score_tech_2,
+        "FscoreFund": fscore_fund_2,
+        "ScoreFinal": score_final_2,
         "RSI": rsi_val,
         "MACD_hist": macd_h,
         "%toHH52": pct_hh,
@@ -1218,6 +1242,8 @@ with tab_full:
     st.title("Scanner complet — Univers entier")
     profile = get_analysis_profile()
     score_label = get_score_label()
+    today_key = _today_paris_str()
+    cache_key = _daily_cache_key(profile)
 
     # --- Univers normalisé ---
     uni = get_universe_normalized().copy()
@@ -1232,23 +1258,7 @@ with tab_full:
     if "markets_selected" not in st.session_state:
         st.session_state["markets_selected"] = markets_all[:]
 
-    # --- Bandeau d'état (toujours visible) ---
-    key_today = _daily_cache_key(profile)
-    meta_today = st.session_state.get("daily_full_scan", {}).get(key_today, {})
-    ts_last = meta_today.get("ts", "—")
-    cache_ok = (
-        "daily_full_scan" in st.session_state
-        and key_today in st.session_state["daily_full_scan"]
-    )
-
-    st.markdown(
-        f"""
-<div style="background:#F0F4F8;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
-  <b>📅 Dernier scan</b> : {ts_last} · <b>👤 Profil</b> : {profile} · <b>🧠 Cache</b> : {"OK" if cache_ok else "Absent"}
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    status_placeholder = st.empty()
 
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
@@ -1278,21 +1288,44 @@ with tab_full:
             refresh = st.button(
                 "🔄 Rafraîchir (remplacer le cache)", use_container_width=True
             )
-        st.caption("Astuce : le scan complet se lance automatiquement 1×/jour au premier login.")
+        st.caption(
+            "Astuce : le scan complet est mis en cache pour la journée. Utilise 🔄 Rafraîchir pour forcer un nouveau scan."
+        )
 
-    # --- Logique auto-scan / refresh ---
-    if "daily_full_scan" not in st.session_state:
-        st.session_state["daily_full_scan"] = {}
+    # --- Logique cache quotidien / refresh ---
+    st.session_state.setdefault("daily_full_scan", {})
 
-    if refresh:
-        _ = run_full_scan_all_and_cache(profile)
-    elif key_today not in st.session_state["daily_full_scan"]:
-        _ = run_full_scan_all_and_cache(profile)
-    elif do_scan:
-        _ = run_full_scan_all_and_cache(profile)
+    if refresh or do_scan:
+        _compute_daily_scan_cached.clear()
+        df_cached = _compute_daily_scan_cached(profile, today_key)
+        st.session_state["daily_full_scan"][cache_key] = {
+            "df": df_cached,
+            "ts": _now_paris_str(),
+        }
+    else:
+        if cache_key not in st.session_state["daily_full_scan"]:
+            df_cached = _compute_daily_scan_cached(profile, today_key)
+            if isinstance(df_cached, pd.DataFrame) and not df_cached.empty:
+                st.session_state["daily_full_scan"][cache_key] = {
+                    "df": df_cached,
+                    "ts": _now_paris_str(),
+                }
+
+    meta_today = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
+    ts_last = meta_today.get("ts", "—")
+    cache_ok = bool(meta_today)
+
+    status_placeholder.markdown(
+        f"""
+<div style="background:#F0F4F8;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
+  <b>📅 Dernier scan</b> : {ts_last} · <b>👤 Profil</b> : {profile} · <b>🧠 Cache</b> : {"OK" if cache_ok else "Absent"}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # --- Récupération du cache du jour ---
-    meta = st.session_state["daily_full_scan"].get(key_today, {})
+    meta = st.session_state["daily_full_scan"].get(cache_key, {})
     out = meta.get("df")
     if isinstance(out, pd.DataFrame) and not out.empty:
         out = out.copy()
@@ -1340,9 +1373,9 @@ with tab_full:
                 if selected
                 else out.copy()
             )
-            if "EarningsD" in meta.get("df", pd.DataFrame()).columns and hide_before_n and hide_before_n > 0:
-                base = view.copy()
-                view = base[(base["EarningsD"].isna()) | (base["EarningsD"] >= hide_before_n)]
+            view = view.copy()
+            if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
+                view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
             if "ScoreFinal" in view.columns:
                 by = ["ScoreFinal"]
                 asc = [False]
@@ -1358,6 +1391,26 @@ with tab_full:
                     asc.append(True)
                 view = view.sort_values(by=by, ascending=asc)
             view = view.head(int(limit_view)).reset_index(drop=True)
+
+            # -- Earnings : s'assurer que la colonne texte inclut bien J-jours
+            if "Earnings" in view.columns:
+                if ("EarningsD" in view.columns) and ("EarningsDate" in view.columns):
+                    def _fmt_row(row):
+                        d = row.get("EarningsDate")
+                        n = row.get("EarningsD")
+                        try:
+                            s = str(row.get("Earnings", ""))
+                            if any(token in s for token in ["J-", "J0", "J+", "J"]):
+                                return s
+                        except Exception:
+                            pass
+                        return fmt_earnings(d, n)
+
+                    view["Earnings"] = view.apply(_fmt_row, axis=1)
+
+            if "%toHH52" in view.columns:
+                view["%toHH52"] = pd.to_numeric(view["%toHH52"], errors="coerce") * 100
+                view["%toHH52"] = view["%toHH52"].round(1)
 
             cols_main = [
                 "Ticker",
@@ -1375,10 +1428,6 @@ with tab_full:
                 cols_main.insert(insert_at, "RSI")
             present = [c for c in cols_main if c in view.columns]
             display_view = rename_score_for_display(view)
-            if "%toHH52" in display_view.columns:
-                display_view["%toHH52"] = (
-                    pd.to_numeric(display_view["%toHH52"], errors="coerce") * 100
-                ).round(1)
             display_cols = map_score_column(present)
             display_cols = [c for c in display_cols if c in display_view.columns]
 
