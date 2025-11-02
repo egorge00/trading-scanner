@@ -20,13 +20,42 @@ import yfinance as yf
 
 
 def _round_numeric_cols(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
-    """Arrondit toutes les colonnes numériques du DataFrame à n décimales."""
-
     if df is None or df.empty:
         return df
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].round(n)
+    return df
+
+
+def _daily_cache_key(profile: str) -> str:
+    return f"{_today_paris_str()}|{profile}"
+
+
+def _get_full_scan_df_for_today(profile: str) -> pd.DataFrame:
+    key = _daily_cache_key(profile)
+    meta = st.session_state.get("daily_full_scan", {}).get(key)
+    if meta and isinstance(meta.get("df"), pd.DataFrame):
+        return meta["df"]
+    return pd.DataFrame()
+
+
+def _subset_watchlist_from_fullscan(
+    wl: list[str], full_df: pd.DataFrame
+) -> pd.DataFrame:
+    if full_df is None or full_df.empty or not wl:
+        return pd.DataFrame()
+    wl_u = [str(t).upper().strip() for t in wl if str(t).strip()]
+    df = full_df.copy()
+    if "Ticker" not in df.columns:
+        return pd.DataFrame()
+    df = df[df["Ticker"].isin(wl_u)].copy()
+    order = {t: i for i, t in enumerate(wl_u)}
+    df["__ord__"] = df["Ticker"].map(order)
+    df = df.sort_values(
+        by=["__ord__", "ScoreFinal", "Ticker"],
+        ascending=[True, False, True],
+    ).drop(columns="__ord__", errors="ignore")
     return df
 
 
@@ -100,26 +129,139 @@ def _now_paris_str() -> str:
     return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def _daily_cache_key(profile: str) -> str:
-    return f"{_today_paris_str()}|{profile}"
-
-
-def _wl_cache_key(profile: str) -> str:
-    return f"{_today_paris_str()}|{profile}|watchlist"
-
-
 def _now_paris_iso():
     return datetime.now(tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-@st.cache_data(ttl=60 * 60 * 26, show_spinner=False)
-def _compute_daily_scan_cached(profile: str, date_key: str) -> pd.DataFrame:
-    """Calcule le scan complet et le renvoie (cache persistant ~1 jour)."""
+def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
+    """Calcule le scan complet (sans Streamlit UI)."""
 
-    # date_key fait partie de la clé de cache pour invalider chaque jour
-    _ = date_key
-    df = run_full_scan_all_and_cache(profile)
-    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    uni = get_universe_normalized()
+    tickers = (
+        uni["ticker"].astype(str).str.upper().dropna().unique().tolist()
+    )
+    if not tickers:
+        return pd.DataFrame()
+
+    rows, failures = [], []
+    max_workers = min(max_workers, max(2, (os.cpu_count() or 4) * 2))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(score_ticker_cached, t, profile): t for t in tickers}
+        for fut in as_completed(futs):
+            res = fut.result()
+            if isinstance(res, dict) and res.get("error"):
+                failures.append(res)
+            else:
+                rows.append(res)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    if "%toHH52" in out.columns:
+        out["%toHH52"] = pd.to_numeric(out["%toHH52"], errors="coerce") * 100
+    if "Market" in out.columns:
+        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
+
+    out = _round_numeric_cols(out, 2)
+    cols = [
+        "Ticker",
+        "Name",
+        "Market",
+        "Signal",
+        "ScoreFinal",
+        "ScoreTech",
+        "FscoreFund",
+        "RSI",
+        "%toHH52",
+        "Earnings",
+        "EarningsDate",
+        "EarningsD",
+    ]
+    out = out[[c for c in cols if c in out.columns]]
+    if "ScoreFinal" in out.columns:
+        out = out.sort_values(
+            by=["ScoreFinal", "Ticker"], ascending=[False, True]
+        ).reset_index(drop=True)
+    return out
+
+
+def run_full_scan_all_and_cache_ui(profile: str, max_workers: int = 8) -> pd.DataFrame:
+    """Exécute le scan complet avec barre de progression et met à jour le cache."""
+
+    uni = get_universe_normalized()
+    tickers = (
+        uni["ticker"].astype(str).str.upper().dropna().unique().tolist()
+    )
+    if not tickers:
+        st.warning("Univers vide : aucun ticker à scanner.")
+        return pd.DataFrame()
+
+    rows, failures = [], []
+    progress = st.progress(0, text=f"Scan en cours… (0/{len(tickers)})")
+    done = 0
+    max_workers = min(max_workers, max(2, (os.cpu_count() or 4) * 2))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(score_ticker_cached, t, profile): t for t in tickers}
+        total = len(futs)
+        for fut in as_completed(futs):
+            res = fut.result()
+            done += 1
+            progress.progress(done / total, text=f"Scan en cours… ({done}/{total})")
+            if isinstance(res, dict) and res.get("error"):
+                failures.append(res)
+            else:
+                rows.append(res)
+
+    progress.empty()
+    st.success(f"✅ Scan terminé ({done}/{len(tickers)})")
+
+    if failures:
+        with st.expander("Diagnostics (échecs)"):
+            st.dataframe(pd.DataFrame(failures), use_container_width=True, height=240)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    if "%toHH52" in out.columns:
+        out["%toHH52"] = pd.to_numeric(out["%toHH52"], errors="coerce") * 100
+    if "Market" in out.columns:
+        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
+    out = _round_numeric_cols(out, 2)
+
+    cols = [
+        "Ticker",
+        "Name",
+        "Market",
+        "Signal",
+        "ScoreFinal",
+        "ScoreTech",
+        "FscoreFund",
+        "RSI",
+        "%toHH52",
+        "Earnings",
+        "EarningsDate",
+        "EarningsD",
+    ]
+    out = out[[c for c in cols if c in out.columns]]
+    if "ScoreFinal" in out.columns:
+        out = out.sort_values(
+            by=["ScoreFinal", "Ticker"], ascending=[False, True]
+        ).reset_index(drop=True)
+
+    key = _daily_cache_key(profile)
+    st.session_state.setdefault("daily_full_scan", {})
+    st.session_state["daily_full_scan"][key] = {"df": out, "ts": _now_paris_str()}
+    return out
+
+
+@st.cache_data(ttl=60 * 60 * 26, show_spinner=False)
+def compute_full_scan_cached(profile: str, date_key: str) -> pd.DataFrame:
+    """Cache persistant 1 jour"""
+
+    return compute_full_scan_df(profile)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -691,170 +833,6 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     }
 
 
-def run_watchlist_scan_and_cache(
-    tickers: list[str], profile: str, max_workers: int = 8
-) -> pd.DataFrame:
-    tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
-    if not tickers:
-        return pd.DataFrame()
-
-    st.info(f"🚀 Scan de la watchlist ({len(tickers)} tickers)…")
-    rows, failures = [], []
-    progress = st.progress(0, text=f"Scan en cours… (0/{len(tickers)})")
-    done = 0
-    max_workers = min(max_workers, max(2, (os.cpu_count() or 4) * 2))
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(score_ticker_cached, t, profile): t for t in tickers}
-        total = len(futs)
-        for fut in as_completed(futs):
-            res = fut.result()
-            done += 1
-            progress.progress(done / total, text=f"Scan en cours… ({done}/{total})")
-            if isinstance(res, dict) and res.get("error"):
-                failures.append(res)
-            else:
-                rows.append(res)
-
-    progress.empty()
-    st.success(f"✅ Scan watchlist terminé ({done}/{len(tickers)})")
-
-    if failures:
-        with st.expander("Diagnostics (échecs)"):
-            st.dataframe(pd.DataFrame(failures), use_container_width=True, height=240)
-
-    if not rows:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(rows)
-
-    # Nettoyage / Normalisation
-    if "%toHH52" in out.columns:
-        out["%toHH52"] = pd.to_numeric(out["%toHH52"], errors="coerce") * 100
-    if "Market" in out.columns:
-        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
-
-    # 🔸 ARRONDI UNIVERSEL
-    out = _round_numeric_cols(out, 2)
-
-    # Colonnes principales
-    keep = [
-        "Ticker",
-        "Name",
-        "Market",
-        "Signal",
-        "Score",
-        "ScoreFinal",
-        "ScoreTech",
-        "FscoreFund",
-        "RSI",
-        "%toHH52",
-        "Earnings",
-        "EarningsDate",
-        "EarningsD",
-    ]
-    out = out[[c for c in keep if c in out.columns]]
-    out = out.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True]).reset_index(
-        drop=True
-    )
-
-    # Cache journalier
-    ck = _wl_cache_key(profile)
-    st.session_state.setdefault("watchlist_scan", {})
-    wl_hash = hashlib.md5((",".join(tickers)).encode()).hexdigest()
-    st.session_state["watchlist_scan"][ck] = {
-        "df": out,
-        "ts": _now_paris_str(),
-        "h": wl_hash,
-    }
-    return out
-
-
-def run_full_scan_all_and_cache(profile: str, max_workers: int = 8) -> pd.DataFrame:
-    uni = get_universe_normalized()
-    tickers = uni["ticker"].astype(str).str.upper().dropna().unique().tolist()
-
-    if not tickers:
-        st.warning("Univers vide : aucun ticker à scanner.")
-        return pd.DataFrame()
-
-    st.info(f"🚀 Scan complet de l’univers ({len(tickers)} tickers)…")
-
-    rows, failures = [], []
-    progress = st.progress(0, text=f"Scan en cours… (0/{len(tickers)})")
-    done = 0
-    max_workers = min(max_workers, max(2, (os.cpu_count() or 4) * 2))
-
-    ts_start = _now_paris_str()
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(score_ticker_cached, t, profile): t for t in tickers}
-        total = len(futs)
-        for fut in as_completed(futs):
-            res = fut.result()
-            done += 1
-            progress.progress(done / total, text=f"Scan en cours… ({done}/{total})")
-            if isinstance(res, dict) and res.get("error"):
-                failures.append(res)
-            else:
-                rows.append(res)
-
-    progress.empty()
-    st.success(f"✅ Scan terminé ({done}/{len(tickers)}) — démarré à {ts_start}")
-
-    if failures:
-        with st.expander("Diagnostics (échecs)"):
-            df_fail = pd.DataFrame(failures)
-            st.dataframe(df_fail, use_container_width=True, height=240)
-
-    if not rows:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(rows)
-    if "ScoreFinal" in out.columns:
-        by = ["ScoreFinal"]
-        asc = [False]
-        if "Ticker" in out.columns:
-            by.append("Ticker")
-            asc.append(True)
-        out = out.sort_values(by=by, ascending=asc)
-    elif "Score" in out.columns:
-        by = ["Score"]
-        asc = [False]
-        if "Ticker" in out.columns:
-            by.append("Ticker")
-            asc.append(True)
-        out = out.sort_values(by=by, ascending=asc)
-    out = out.reset_index(drop=True)
-    cols = [
-        "Ticker",
-        "Name",
-        "Market",
-        "Signal",
-        "Score",
-        "ScoreTech",
-        "FscoreFund",
-        "ScoreFinal",
-        "RSI",
-        "MACD_hist",
-        "%toHH52",
-        "VolZ20",
-        "Earnings",
-        "EarningsDate",
-        "EarningsD",
-    ]
-    out = out[[c for c in cols if c in out.columns]]
-
-    if "Market" in out.columns:
-        out["Market"] = out["Market"].astype(str).str.strip().str.upper()
-
-    out = _round_numeric_cols(out, 2)
-
-    key = _daily_cache_key(profile)
-    st.session_state.setdefault("daily_full_scan", {})
-    st.session_state["daily_full_scan"][key] = {"df": out, "ts": _now_paris_str()}
-    return out
-
-
 def score_one(ticker: str, profile: str | None = None, *, debug: bool = False):
     """Thread-safe: ne modifie pas st.session_state. Retourne un dict score ou {'error','trace'}."""
 
@@ -1123,183 +1101,94 @@ with tab_scan:
             st.info("Tape un nom, un ISIN ou un ticker pour rechercher dans la base.")
 
     st.divider()
-    st.subheader("📈 Scanner ma watchlist")
-    tickers = [
-        _norm_ticker(t)
-        for t in my_wl.loc[my_wl["ticker"].astype(str).str.len() > 0, "ticker"].tolist()
-    ]
-    tickers = [t for t in tickers if t]
-
-    if not tickers:
-        st.info("Ta watchlist est vide. Ajoute des valeurs puis lance un scan.")
-    else:
-        st.session_state.setdefault("watchlist_scan", {})
-        cache_key = _wl_cache_key(profile_current)
-        meta_watch = st.session_state["watchlist_scan"].get(cache_key, {})
-        cached_df = meta_watch.get("df")
-        if not isinstance(cached_df, pd.DataFrame):
-            cached_df = pd.DataFrame()
-        cached_ts = meta_watch.get("ts", "—")
-        cached_hash = meta_watch.get("h")
-        wl_hash = hashlib.md5((",".join(tickers)).encode()).hexdigest()
-
-        col_run, col_refresh = st.columns([3, 1])
-        with col_run:
-            run = st.button(
-                "🚀 Scanner maintenant (ma watchlist)", use_container_width=True
-            )
-        with col_refresh:
-            refresh = st.button("🔄 Forcer un rescan", use_container_width=True)
-
-        if refresh:
-            st.session_state["watchlist_scan"].pop(cache_key, None)
-            cached_df = pd.DataFrame()
-            cached_ts = "—"
-            cached_hash = None
-
-        need_scan = bool(tickers and (run or refresh))
-
-        if need_scan:
-            df_scan = run_watchlist_scan_and_cache(tickers, profile_current)
-            meta_watch = st.session_state.get("watchlist_scan", {}).get(cache_key, {})
-            cached_df = meta_watch.get("df")
-            if not isinstance(cached_df, pd.DataFrame):
-                cached_df = pd.DataFrame()
-            cached_ts = meta_watch.get("ts", "—")
-            cached_hash = meta_watch.get("h")
-        else:
-            df_scan = cached_df.copy()
-
-        cache_status = "OK ✅" if (cached_hash == wl_hash and not cached_df.empty) else "À rafraîchir"
-        st.caption(
-            f"Dernier scan : {cached_ts} · Profil : {profile_current} · Cache : {cache_status}"
+    profile_current = st.session_state.get(PROFILE_KEY, "Investisseur")
+    my_wl_list = []
+    if not my_wl.empty and "ticker" in my_wl.columns:
+        my_wl_list = [
+            str(t).upper().strip()
+            for t in my_wl["ticker"].astype(str).tolist()
+            if str(t).strip()
+        ]
+    tickers_caption = ", ".join(my_wl_list) if my_wl_list else "—"
+    st.markdown("### ⭐ Ma Watchlist")
+    colA, colB, colC = st.columns([2, 1, 1])
+    with colA:
+        st.caption(f"Tickers ({len(my_wl_list)}) : {tickers_caption}")
+    with colB:
+        refresh_full = st.button(
+            "🔄 Rafraîchir le SCAN COMPLET",
+            use_container_width=True,
+            key="refresh_full_scan_watchlist",
         )
-        if cached_hash and cached_hash != wl_hash and not need_scan:
-            st.warning(
-                "Ta watchlist a changé depuis le dernier scan. Clique sur 🚀 pour rafraîchir."
-            )
+    with colC:
+        hide_before_n_wl = st.selectbox(
+            "Masquer si earnings < N jours",
+            [0, 1, 2, 3, 5, 7, 14],
+            index=0,
+            key="watchlist_hide_earnings_days",
+        )
 
-        if df_scan.empty:
-            st.info("Aucun résultat exploitable sur la watchlist pour l’instant.")
-        else:
-            df_scan = df_scan.copy()
+    if refresh_full:
+        compute_full_scan_cached.clear()
+        _ = run_full_scan_all_and_cache_ui(profile_current)
 
-            limit_default = min(100, max(10, len(df_scan) or len(tickers) or 10))
-            col_limit, col_hide = st.columns([3, 1])
-            with col_limit:
-                limit_view = st.slider(
-                    "Limite d’affichage",
-                    min_value=10,
-                    max_value=500,
-                    value=limit_default,
-                    step=10,
-                    key="watchlist_limit",
-                )
-            with col_hide:
-                hide_before_n = st.selectbox(
-                    "Masquer si earnings < N jours",
-                    [0, 1, 2, 3, 5, 7, 14],
-                    index=0,
-                    key="watchlist_hide_earnings",
-                )
+    full_today = _get_full_scan_df_for_today(profile_current)
+    if full_today.empty:
+        st.info("⚠️ Lance d’abord un ‘Scan complet’ ou clique sur ‘🔄 Rafraîchir’.")
+        view = pd.DataFrame()
+    else:
+        view = _subset_watchlist_from_fullscan(my_wl_list, full_today)
+        if not view.empty and "EarningsD" in view.columns and hide_before_n_wl:
+            if hide_before_n_wl > 0:
+                view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n_wl)]
+        view = _round_numeric_cols(view, 2)
 
-            view = df_scan.copy()
-
-            if "Earnings" in view.columns and {"EarningsD", "EarningsDate"}.issubset(view.columns):
-
-                def _fmt_row(row):
-                    d = row.get("EarningsDate")
-                    n = row.get("EarningsD")
-                    try:
-                        s = str(row.get("Earnings", ""))
-                        if any(token in s for token in ["J-", "J0", "J+", "J"]):
-                            return s
-                    except Exception:
-                        pass
-                    return fmt_earnings(d, n)
-
-                view["Earnings"] = view.apply(_fmt_row, axis=1)
-
-            if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
-                view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
-
-            view = _round_numeric_cols(view, 2)
-
-            view = view.head(int(limit_view)).reset_index(drop=True)
-
-            cols_main = [
-                "Ticker",
-                "Name",
-                "Market",
-                "Signal",
-                "ScoreFinal",
-                "ScoreTech",
-                "FscoreFund",
-                "%toHH52",
-                "Earnings",
-            ]
-            if profile_current != "Investisseur":
-                insert_at = cols_main.index("%toHH52")
-                cols_main.insert(insert_at, "RSI")
-
-            present = [c for c in cols_main if c in view.columns]
-            display_view = rename_score_for_display(view)
-            display_cols = map_score_column(present)
-            display_cols = [c for c in display_cols if c in display_view.columns]
-            main_df = display_view[display_cols] if display_cols else display_view
-
-            score_col = map_score_column(["Score"])[0]
-            if not main_df.empty:
-                styled = main_df.style
-                if "ScoreFinal" in main_df.columns:
-                    styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
-                if score_col in main_df.columns:
-                    styled = styled.apply(_color_score, subset=[score_col])
-                st.dataframe(styled, use_container_width=True, height=480)
-            else:
-                st.dataframe(main_df, use_container_width=True, height=480)
-
-            with st.expander("🔎 Détails techniques (colonnes supplémentaires)"):
-                extra_cols = ["RSI", "MACD_hist", "VolZ20", "Score", "ScoreTech", "FscoreFund"]
-                extra_present = [c for c in extra_cols if c in view.columns]
-                if extra_present:
-                    extra_df = view[["Ticker", "Name", "Market"] + extra_present]
-                    st.dataframe(extra_df, use_container_width=True)
-                else:
-                    st.caption("Aucune colonne technique additionnelle disponible.")
-
-            st.download_button(
-                "💾 Export CSV (vue watchlist)",
-                data=view.to_csv(index=False).encode("utf-8"),
-                file_name="watchlist_scan.csv",
-                mime="text/csv",
-            )
-
-            st.markdown("### 🗑️ Supprimer une valeur depuis les résultats")
-            for i, r in view.iterrows():
-                c1, c2, c3, c4 = st.columns([2, 6, 2, 2])
-                with c1:
-                    st.write(f"**{r['Ticker']}**")
-                with c2:
-                    st.write(r.get("Name", ""))
-                with c3:
-                    sf = r.get("ScoreFinal")
-                    st.write(
-                        f"Score final : {sf:.2f}" if sf is not None and not pd.isna(sf) else "Score final : —"
-                    )
-                with c4:
-                    if st.button("🗑️ Retirer", key=f"del_watch_{i}_{r['Ticker']}"):
-                        before = len(my_wl)
-                        my_wl = (
-                            my_wl[my_wl["ticker"] != _norm_ticker(r["Ticker"])]
-                            .reset_index(drop=True)
-                        )
-                        save_my_watchlist(my_wl)
-                        st.success(
-                            f"{r['Ticker']} supprimé ({before - len(my_wl)} ligne)."
-                        )
-                        st.rerun()
-
+    if view is not None and not view.empty:
+        cols_main = [
+            "Ticker",
+            "Name",
+            "Market",
+            "Signal",
+            "ScoreFinal",
+            "ScoreTech",
+            "FscoreFund",
+            "%toHH52",
+            "Earnings",
+        ]
+        if profile_current != "Investisseur" and "RSI" in view.columns:
+            cols_main.insert(cols_main.index("%toHH52"), "RSI")
+        present = [c for c in cols_main if c in view.columns]
+        view = view.sort_values(
+            by=["ScoreFinal", "Ticker"],
+            ascending=[False, True],
+        ).reset_index(drop=True)
+        display_view = rename_score_for_display(view)
+        display_cols = map_score_column(present)
+        display_cols = [c for c in display_cols if c in display_view.columns]
+        main_df = display_view[display_cols] if display_cols else display_view
+        st.subheader("📊 Résultats watchlist (extraits du scan du jour)")
+        st.dataframe(main_df, use_container_width=True, height=520)
+        st.download_button(
+            "💾 Export CSV (watchlist filtrée)",
+            data=view.to_csv(index=False).encode("utf-8"),
+            file_name="watchlist_scan_view.csv",
+            mime="text/csv",
+        )
+        st.caption("🗑️ Retirer de la watchlist :")
+        cols_rm = st.columns(min(5, max(1, len(view))))
+        for i, (_, row) in enumerate(view.iterrows()):
+            if i < len(cols_rm):
+                with cols_rm[i]:
+                    if st.button(
+                        f"🗑️ {row['Ticker']}",
+                        key=f"rmwl_{row['Ticker']}",
+                    ):
+                        mask = ~my_wl["ticker"].astype(str).str.upper().eq(row["Ticker"])
+                        updated = my_wl[mask].reset_index(drop=True)
+                        save_my_watchlist(updated)
+                        st.experimental_rerun()
+    else:
+        st.info("Votre watchlist est vide ou aucun de ses tickers n’est présent dans le scan du jour.")
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
 
@@ -1422,7 +1311,7 @@ with tab_full:
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
     with card("🔧 Panneau de contrôle"):
-        c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 1])
+        c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
         with c1:
             selected_markets = st.multiselect(
                 "Marchés",
@@ -1442,33 +1331,31 @@ with tab_full:
                 help="0 = ne rien masquer",
             )
         with c4:
-            do_scan = st.button("🚀 Lancer le scan complet", use_container_width=True)
-        with c5:
             refresh = st.button(
-                "🔄 Rafraîchir (remplacer le cache)", use_container_width=True
+                "🔄 Rafraîchir le SCAN COMPLET", use_container_width=True
             )
         st.caption(
-            "Astuce : le scan complet est mis en cache pour la journée. Utilise 🔄 Rafraîchir pour forcer un nouveau scan."
+            "Astuce : le scan complet est mis en cache pour la journée. Utilise 🔄 Rafraîchir pour lancer un nouveau calcul."
         )
 
-    # --- Logique cache quotidien / refresh ---
-    st.session_state.setdefault("daily_full_scan", {})
+    profile = st.session_state.get(PROFILE_KEY, "Investisseur")
+    today_key = _today_paris_str()
+    cache_key = _daily_cache_key(profile)
 
-    if refresh or do_scan:
-        _compute_daily_scan_cached.clear()
-        df_cached = _compute_daily_scan_cached(profile, today_key)
-        st.session_state["daily_full_scan"][cache_key] = {
-            "df": df_cached,
-            "ts": _now_paris_str(),
-        }
-    else:
-        if cache_key not in st.session_state["daily_full_scan"]:
-            df_cached = _compute_daily_scan_cached(profile, today_key)
-            if isinstance(df_cached, pd.DataFrame) and not df_cached.empty:
-                st.session_state["daily_full_scan"][cache_key] = {
-                    "df": df_cached,
-                    "ts": _now_paris_str(),
-                }
+    if "daily_full_scan" not in st.session_state:
+        st.session_state["daily_full_scan"] = {}
+
+    if refresh:
+        compute_full_scan_cached.clear()
+        _ = run_full_scan_all_and_cache_ui(profile)
+
+    if cache_key not in st.session_state["daily_full_scan"]:
+        df_cached = compute_full_scan_cached(profile, today_key)
+        if isinstance(df_cached, pd.DataFrame) and not df_cached.empty:
+            st.session_state["daily_full_scan"][cache_key] = {
+                "df": df_cached.copy(),
+                "ts": _now_paris_str(),
+            }
 
     meta_today = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
     ts_last = meta_today.get("ts", "—")
@@ -1476,103 +1363,50 @@ with tab_full:
 
     status_placeholder.markdown(
         f"""
-<div style="background:#F0F4F8;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
-  <b>📅 Dernier scan</b> : {ts_last} · <b>👤 Profil</b> : {profile} · <b>🧠 Cache</b> : {"OK" if cache_ok else "Absent"}
-</div>
-""",
+ <div style="background:#F0F4F8;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
+   <b>📅 Dernier scan</b> : {ts_last} · <b>👤 Profil</b> : {profile} · <b>🧠 Cache</b> : {"OK" if cache_ok else "Absent"}
+ </div>
+ """
+        ,
         unsafe_allow_html=True,
     )
 
-    # --- Récupération du cache du jour ---
     meta = st.session_state["daily_full_scan"].get(cache_key, {})
     out = meta.get("df")
     if isinstance(out, pd.DataFrame) and not out.empty:
-        out = out.copy()
-        need_cols = [
-            "Ticker",
-            "Name",
-            "Market",
-            "Signal",
-            "Score",
-            "ScoreTech",
-            "FscoreFund",
-            "ScoreFinal",
-            "RSI",
-            "MACD_hist",
-            "%toHH52",
-            "VolZ20",
-            "Earnings",
-            "EarningsDate",
-            "EarningsD",
-        ]
-        out = out[[c for c in need_cols if c in out.columns]]
-        if "Market" in out.columns:
-            out["Market"] = out["Market"].astype(str).str.strip().str.upper()
+        view = out.copy()
+        if selected_markets and selected_markets != markets_all:
+            view = view[view["Market"].isin([m.upper() for m in selected_markets])]
 
-        # --- Bloc 2 : Statistiques rapides ---
+        if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
+            view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
+
+        view = _round_numeric_cols(view, 2)
+        view = view.head(int(limit_view)).reset_index(drop=True)
+
         with card("📈 Statistiques du scan (cache du jour)"):
-            sig_series = out.get("Signal", pd.Series(dtype="object")).fillna("")
-            buy = sig_series.str.contains("BUY").mean() * 100 if not out.empty else 0.0
-            hold = sig_series.str.contains("HOLD").mean() * 100 if not out.empty else 0.0
-            sell = sig_series.str.contains("SELL").mean() * 100 if not out.empty else 0.0
+            sig_series = view.get("Signal", pd.Series(dtype="object")).fillna("")
+            buy = sig_series.str.contains("BUY").mean() * 100 if not view.empty else 0.0
+            hold = sig_series.str.contains("HOLD").mean() * 100 if not view.empty else 0.0
+            sell = sig_series.str.contains("SELL").mean() * 100 if not view.empty else 0.0
             avg_score = (
-                out["ScoreFinal"].mean()
-                if "ScoreFinal" in out.columns and not out["ScoreFinal"].isna().all()
-                else float("nan")
+                view["ScoreFinal"].mean()
+                if "ScoreFinal" in view.columns and not view["ScoreFinal"].isna().all()
+                else None
             )
-            st.info(
-                f"**{buy:.0f}% BUY** · **{hold:.0f}% HOLD** · **{sell:.0f}% SELL** · **Score moyen : {avg_score:.1f}**"
-            )
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Tickers", f"{len(view):,}".replace(",", " "))
+            with col2:
+                st.metric("Signals BUY", f"{buy:.1f}%")
+            with col3:
+                st.metric("Signals HOLD", f"{hold:.1f}%")
+            with col4:
+                st.metric("Signals SELL", f"{sell:.1f}%")
+            if avg_score is not None:
+                st.caption(f"ScoreFinal moyen : {avg_score:.2f}")
 
-        # --- Bloc 3 : Résultats (vue filtrée dynamique sur le cache) ---
-        with card("📊 Résultats du scan"):
-            selected = st.session_state.get("markets_selected", markets_all)
-            view = (
-                out[out["Market"].isin([m.upper() for m in selected])]
-                if selected
-                else out.copy()
-            )
-            view = view.copy()
-            if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
-                view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
-            if "ScoreFinal" in view.columns:
-                by = ["ScoreFinal"]
-                asc = [False]
-                if "Ticker" in view.columns:
-                    by.append("Ticker")
-                    asc.append(True)
-                view = view.sort_values(by=by, ascending=asc)
-            elif "Score" in view.columns:
-                by = ["Score"]
-                asc = [False]
-                if "Ticker" in view.columns:
-                    by.append("Ticker")
-                    asc.append(True)
-                view = view.sort_values(by=by, ascending=asc)
-            view = view.head(int(limit_view)).reset_index(drop=True)
-
-            # -- Earnings : s'assurer que la colonne texte inclut bien J-jours
-            if "Earnings" in view.columns:
-                if ("EarningsD" in view.columns) and ("EarningsDate" in view.columns):
-                    def _fmt_row(row):
-                        d = row.get("EarningsDate")
-                        n = row.get("EarningsD")
-                        try:
-                            s = str(row.get("Earnings", ""))
-                            if any(token in s for token in ["J-", "J0", "J+", "J"]):
-                                return s
-                        except Exception:
-                            pass
-                        return fmt_earnings(d, n)
-
-                    view["Earnings"] = view.apply(_fmt_row, axis=1)
-
-            if "%toHH52" in view.columns:
-                view["%toHH52"] = pd.to_numeric(view["%toHH52"], errors="coerce") * 100
-                view["%toHH52"] = view["%toHH52"].round(2)
-
-            view = _round_numeric_cols(view, 2)
-
+        with card("📊 Résultats du scan (cache du jour)"):
             cols_main = [
                 "Ticker",
                 "Name",
@@ -1584,16 +1418,16 @@ with tab_full:
                 "%toHH52",
                 "Earnings",
             ]
-            if profile != "Investisseur":
-                insert_at = cols_main.index("%toHH52")
-                cols_main.insert(insert_at, "RSI")
+            if profile != "Investisseur" and "RSI" in view.columns:
+                cols_main.insert(cols_main.index("%toHH52"), "RSI")
+
             present = [c for c in cols_main if c in view.columns]
             display_view = rename_score_for_display(view)
             display_cols = map_score_column(present)
             display_cols = [c for c in display_cols if c in display_view.columns]
+            main_df = display_view[display_cols] if display_cols else display_view
 
             score_col = map_score_column(["Score"])[0]
-            main_df = display_view[display_cols]
             if not main_df.empty:
                 styled = main_df.style
                 if "ScoreFinal" in main_df.columns:
@@ -1619,7 +1453,6 @@ with tab_full:
                 file_name="full_scan_view.csv",
                 mime="text/csv",
             )
-
         # --- Bloc 4 : Watchlist (gestion) ---
         with card("⭐ Ma Watchlist"):
             st.caption(
