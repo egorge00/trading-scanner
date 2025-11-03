@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import io
 import difflib
@@ -26,6 +27,27 @@ def _round_numeric_cols(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
         if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].round(n)
     return df
+
+
+PRECOMPUTED_PARQUET = "data/daily_scan_latest.parquet"
+PRECOMPUTED_META = "data/daily_scan_latest.json"
+
+
+def _load_precomputed_df() -> tuple[pd.DataFrame, str]:
+    """Charge le parquet/json pré-calculés; renvoie (df, horodatage lisible)."""
+
+    ts = "—"
+    if os.path.exists(PRECOMPUTED_PARQUET):
+        df = pd.read_parquet(PRECOMPUTED_PARQUET)
+        if os.path.exists(PRECOMPUTED_META):
+            try:
+                with open(PRECOMPUTED_META, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                ts = meta.get("generated_at_utc", "—")
+            except Exception:
+                pass
+        return df, ts
+    return pd.DataFrame(), ts
 
 
 def _daily_cache_key(profile: str) -> str:
@@ -255,13 +277,6 @@ def run_full_scan_all_and_cache_ui(profile: str, max_workers: int = 8) -> pd.Dat
     st.session_state.setdefault("daily_full_scan", {})
     st.session_state["daily_full_scan"][key] = {"df": out, "ts": _now_paris_str()}
     return out
-
-
-@st.cache_data(ttl=60 * 60 * 26, show_spinner=False)
-def compute_full_scan_cached(profile: str, date_key: str) -> pd.DataFrame:
-    """Cache persistant 1 jour"""
-
-    return compute_full_scan_df(profile)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1129,7 +1144,6 @@ with tab_scan:
         )
 
     if refresh_full:
-        compute_full_scan_cached.clear()
         _ = run_full_scan_all_and_cache_ui(profile_current)
 
     full_today = _get_full_scan_df_for_today(profile_current)
@@ -1290,7 +1304,6 @@ with tab_full:
     st.title("Scanner complet — Univers entier")
     profile = get_analysis_profile()
     score_label = get_score_label()
-    today_key = _today_paris_str()
     cache_key = _daily_cache_key(profile)
 
     # --- Univers normalisé ---
@@ -1305,8 +1318,6 @@ with tab_full:
     # --- État de sélection persistant (multiselect) ---
     if "markets_selected" not in st.session_state:
         st.session_state["markets_selected"] = markets_all[:]
-
-    status_placeholder = st.empty()
 
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
@@ -1339,35 +1350,35 @@ with tab_full:
         )
 
     profile = st.session_state.get(PROFILE_KEY, "Investisseur")
-    today_key = _today_paris_str()
     cache_key = _daily_cache_key(profile)
 
     if "daily_full_scan" not in st.session_state:
         st.session_state["daily_full_scan"] = {}
 
-    if refresh:
-        compute_full_scan_cached.clear()
-        _ = run_full_scan_all_and_cache_ui(profile)
-
     if cache_key not in st.session_state["daily_full_scan"]:
-        df_cached = compute_full_scan_cached(profile, today_key)
-        if isinstance(df_cached, pd.DataFrame) and not df_cached.empty:
+        df_pre, ts = _load_precomputed_df()
+        if not df_pre.empty:
             st.session_state["daily_full_scan"][cache_key] = {
-                "df": df_cached.copy(),
-                "ts": _now_paris_str(),
+                "df": df_pre.copy(),
+                "ts": ts,
             }
+        else:
+            st.warning(
+                "Aucun fichier pré-calculé trouvé. Lance un '🔄 Rafraîchir' pour calculer un scan maintenant."
+            )
+
+    if refresh:
+        _ = run_full_scan_all_and_cache_ui(profile)
 
     meta_today = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
     ts_last = meta_today.get("ts", "—")
-    cache_ok = bool(meta_today)
 
-    status_placeholder.markdown(
+    st.markdown(
         f"""
- <div style="background:#F0F4F8;padding:10px 12px;border-radius:10px;margin-bottom:12px;">
-   <b>📅 Dernier scan</b> : {ts_last} · <b>👤 Profil</b> : {profile} · <b>🧠 Cache</b> : {"OK" if cache_ok else "Absent"}
- </div>
- """
-        ,
+<div style="background:#F0F4F8;padding:10px;border-radius:10px;margin-bottom:12px;">
+  <b>📅 Scan du jour</b> : {ts_last} · <b>Règles</b> : pré-calcul à 08:30 Paris · aucun scan au login · <b>🔄 Rafraîchir</b> pour recalculer
+</div>
+""",
         unsafe_allow_html=True,
     )
 
