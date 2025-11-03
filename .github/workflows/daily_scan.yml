@@ -1,0 +1,41 @@
+name: Daily Precompute Scan
+
+on:
+  schedule:
+    # 07:30 UTC ≈ 08:30 Paris (hiver) / 09:30 (été)
+    - cron: "30 7 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Precompute full scan
+        env:
+          PROFILE: Investisseur
+        run: |
+          python scripts/precompute_scan.py
+
+      - name: Commit artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/daily_scan_latest.parquet data/daily_scan_latest.json
+          git commit -m "chore(data): daily precomputed scan at $(date -u +\"%Y-%m-%dT%H:%M:%SZ\")" || echo "No changes"
+          git push
