@@ -7,6 +7,7 @@ import datetime as dt
 import base64
 import contextlib
 import hashlib
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -134,15 +135,6 @@ def render_results_table(
 
     st.subheader(title)
 
-    hide_no_fund = st.checkbox(
-        "Masquer les valeurs sans fondamentaux disponibles",
-        value=False,
-        help="N’affiche pas les lignes où FscoreFund est indisponible (None).",
-        key=f"hide_no_fund_{hashlib.md5((title or '').encode('utf-8')).hexdigest()}",
-    )
-    if hide_no_fund and "FscoreFund" in view.columns:
-        view = view[~view["FscoreFund"].isna()].copy()
-
     cols = main_table_columns(profile, view.columns.tolist())
 
     if "ScoreFinal" in view.columns:
@@ -151,11 +143,31 @@ def render_results_table(
     view_display = view.copy()
 
     def _fmt_blank(x):
-        return "—" if pd.isna(x) else x
+        import pandas as pd
+
+        if x is None:
+            return "—"
+        try:
+            if pd.isna(x):
+                return "—"
+        except Exception:
+            pass
+        return x
 
     for c in ["FscoreFund", "ScoreFinal", "ScoreTech"]:
         if c in view_display.columns:
             view_display[c] = view_display[c].apply(_fmt_blank)
+
+    hide_no_fund = st.checkbox(
+        "Masquer les valeurs sans fondamentaux disponibles",
+        value=False,
+        help="N’affiche pas les lignes où FscoreFund est indisponible (None).",
+        key=f"hide_no_fund_{hashlib.md5((title or '').encode('utf-8')).hexdigest()}",
+    )
+    if hide_no_fund and "FscoreFund" in view_display.columns:
+        mask = view_display["FscoreFund"] != "—"
+        view_display = view_display[mask].copy()
+        view = view[mask].copy()
 
     styled = view_display[cols].style if len(cols) else view_display.style
     if "Earnings" in cols:
@@ -434,10 +446,22 @@ from api.core.scoring import (  # noqa: E402
     compute_score,
     compute_score_investor,
 )
-from api.core.fundamentals import (  # noqa: E402
-    compute_fscore_continuous_safe,
-    get_fundamentals,
-)
+# --- fondamentaux (safe) ---
+try:  # noqa: E402
+    from api.core.fundamentals import (  # type: ignore[attr-defined]
+        compute_fscore_continuous_safe,
+        get_fundamentals,
+    )
+except Exception as e:  # pragma: no cover - import fallback for Streamlit runtime
+    import streamlit as st
+
+    st.error(f"Import fondamentaux impossible: {e}")
+
+    def get_fundamentals(_):
+        return {}
+
+    def compute_fscore_continuous_safe(_):
+        return (None, {"reason": "import_failed"})
 
 # --- Normalisation marchés ---
 def _norm_market(m: str) -> str:
@@ -840,15 +864,28 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     fund = get_fundamentals(tkr)
     fscore, fmeta = compute_fscore_continuous_safe(fund)
 
-    raw_score = float(score) if score is not None else None
-    tech100 = None if raw_score is None or np.isnan(raw_score) else max(0.0, min(100.0, (raw_score + 5.0) * 10.0))
+    raw_score = None
+    if score is not None:
+        try:
+            raw_score = float(score)
+        except Exception:
+            raw_score = None
+
+    tech100 = None
+    if raw_score is not None:
+        try:
+            if not math.isnan(raw_score):
+                tech100 = max(0.0, min(100.0, (raw_score + 5.0) * 10.0))
+        except Exception:
+            tech100 = None
+
     WEIGHT_TECH = 0.7
     WEIGHT_FUND = 0.3
-    if fscore is None and (tech100 is None or np.isnan(tech100)):
+    if fscore is None and tech100 is None:
         combo = None
     elif fscore is None:
         combo = float(tech100)
-    elif tech100 is None or np.isnan(tech100):
+    elif tech100 is None:
         combo = float(fscore)
     else:
         combo = WEIGHT_TECH * float(tech100) + WEIGHT_FUND * float(fscore)
@@ -862,12 +899,12 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
     # -- ARRONDIS (2 décimales)
     def _r2(x):
         try:
-            val = round(float(x), 2)
-            if np.isnan(val):
-                return None
-            return val
+            val = float(x)
         except Exception:
             return None
+        if math.isnan(val):
+            return None
+        return round(val, 2)
 
     score_final_2 = _r2(combo) if "combo" in locals() else None
     score_tech_2 = _r2(tech100) if "tech100" in locals() else None
