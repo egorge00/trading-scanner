@@ -1245,9 +1245,10 @@ with tab_full:
     profile = get_analysis_profile()
     cache_key = _daily_cache_key(profile)
 
+    st.session_state.setdefault("daily_full_scan", {})
+
     if (
-        "daily_full_scan" not in st.session_state
-        or cache_key not in st.session_state["daily_full_scan"]
+        cache_key not in st.session_state["daily_full_scan"]
     ):
         df_pre, ts = load_precomputed_for_profile(profile)
         if not df_pre.empty:
@@ -1317,7 +1318,7 @@ with tab_full:
         unsafe_allow_html=True,
     )
 
-    meta = st.session_state["daily_full_scan"].get(cache_key, {})
+    meta = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
     out = meta.get("df")
     if isinstance(out, pd.DataFrame) and not out.empty:
         view = out.copy()
