@@ -19,16 +19,7 @@ import requests
 import traceback
 import yfinance as yf
 
-
-def _round_numeric_cols(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    for c in df.columns:
-        if pd.api.types.is_numeric_dtype(df[c]):
-            df[c] = df[c].round(n)
-    return df
-
-
+# --- Colonnes standard (identiques pour scan & watchlist) ---
 def main_table_columns(profile: str, df_cols: list[str]) -> list[str]:
     base = [
         "Ticker",
@@ -44,6 +35,112 @@ def main_table_columns(profile: str, df_cols: list[str]) -> list[str]:
     if profile != "Investisseur" and "RSI" in df_cols:
         base.insert(base.index("%toHH52"), "RSI")
     return [c for c in base if c in df_cols]
+
+# --- Helpers d'arrondis numériques ---
+def _round_numeric_cols(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    for c in df.columns:
+        if pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].round(n)
+    return df
+
+# Styles optionnels (réutilisés partout)
+def _style_earnings(series):
+    out = []
+    import re
+
+    for v in series:
+        s = str(v)
+        m = re.search(r"J-(\d+)|J0", s)
+        if m:
+            out.append("background-color:#FFF4CC;")
+            continue
+        out.append("")
+    return out
+
+
+def _style_scorefinal(series):
+    out = []
+    for v in series:
+        try:
+            x = float(v)
+        except Exception:
+            out.append("")
+            continue
+        if x >= 80:
+            out.append("background-color:#E8FAE6;")
+        elif x < 30:
+            out.append("background-color:#FDE8E8;")
+        else:
+            out.append("")
+    return out
+
+
+def render_results_table(
+    df: pd.DataFrame,
+    profile: str,
+    title: str = "📊 Résultats",
+    hide_before_n: int = 0,
+    allow_delete: bool = False,
+    delete_from_watchlist: bool = True,
+):
+    """Affiche le même tableau pour Scan & Watchlist."""
+
+    if df is None or df.empty:
+        st.info("Aucune donnée à afficher.")
+        return
+
+    view = df.copy()
+    if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
+        view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
+
+    if "%toHH52" in view.columns:
+        view["%toHH52"] = pd.to_numeric(view["%toHH52"], errors="coerce")
+
+    view = _round_numeric_cols(view, 2)
+
+    cols = main_table_columns(profile, view.columns.tolist())
+
+    if "ScoreFinal" in view.columns:
+        view = view.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True]).reset_index(drop=True)
+
+    st.subheader(title)
+
+    styled = None
+    if "Earnings" in cols:
+        styled = view[cols].style.apply(_style_earnings, subset=["Earnings"])
+    if styled is not None and "ScoreFinal" in cols:
+        styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
+
+    if styled is not None:
+        st.dataframe(styled, use_container_width=True, height=520)
+    else:
+        st.dataframe(view[cols], use_container_width=True, height=520)
+
+    export_key = f"export_{hashlib.md5((title or '').encode('utf-8')).hexdigest()}"
+    st.download_button(
+        "💾 Export CSV (vue affichée)",
+        data=view[cols].to_csv(index=False).encode("utf-8"),
+        file_name="scanner_view.csv",
+        mime="text/csv",
+        key=export_key,
+    )
+
+    if allow_delete and delete_from_watchlist and "Ticker" in view.columns:
+        st.caption("🗑️ Retirer de la watchlist :")
+        cols_rm = st.columns(min(5, max(1, len(view))))
+        for i, (_, row) in enumerate(view.iterrows()):
+            if i < len(cols_rm):
+                with cols_rm[i]:
+                    if st.button(f"🗑️ {row['Ticker']}", key=f"rmwl_{row['Ticker']}"):
+                        wl = [
+                            t
+                            for t in st.session_state.get("my_watchlist", [])
+                            if t != row["Ticker"]
+                        ]
+                        st.session_state["my_watchlist"] = wl
+                        st.experimental_rerun()
 
 
 PRECOMPUTED_PARQUET = "data/daily_scan_latest.parquet"
@@ -107,40 +204,6 @@ def card(title: str = "", subtitle: str = ""):
         if subtitle:
             st.caption(subtitle)
         yield box
-
-
-def _color_score(s: pd.Series) -> list[str]:
-    styles: list[str] = []
-    for v in s:
-        try:
-            x = float(v)
-        except Exception:
-            styles.append("")
-            continue
-        if x >= 3:
-            styles.append("background-color:#E8FAE6;")
-        elif x <= -3:
-            styles.append("background-color:#FDE8E8;")
-        else:
-            styles.append("")
-    return styles
-
-
-def _style_scorefinal(series: pd.Series) -> list[str]:
-    out: list[str] = []
-    for v in series:
-        try:
-            x = float(v)
-        except Exception:
-            out.append("")
-            continue
-        if x >= 80:
-            out.append("background-color:#E8FAE6;")
-        elif x < 30:
-            out.append("background-color:#FDE8E8;")
-        else:
-            out.append("")
-    return out
 
 
 def signal_from_scorefinal(sf: float | None) -> str:
@@ -1185,53 +1248,37 @@ with tab_scan:
             "Votre watchlist est vide ou aucun de ses tickers n’est présent dans le scan du jour."
         )
     else:
-        if "EarningsD" in view_wl.columns and hide_before_n_wl and hide_before_n_wl > 0:
-            view_wl = view_wl[
-                (view_wl["EarningsD"].isna()) | (view_wl["EarningsD"] >= hide_before_n_wl)
-            ]
-
-        if "%toHH52" in view_wl.columns:
-            view_wl["%toHH52"] = pd.to_numeric(view_wl["%toHH52"], errors="coerce")
-        view_wl = _round_numeric_cols(view_wl, 2)
-
-        cols = main_table_columns(profile, view_wl.columns.tolist())
-        if "ScoreFinal" in view_wl.columns:
-            view_wl = view_wl.sort_values(
-                by=["ScoreFinal", "Ticker"], ascending=[False, True]
-            ).reset_index(drop=True)
-
-        st.subheader("📊 Résultats (watchlist) — mêmes colonnes que le SCAN")
-
-        if "Earnings" in cols and "_style_earnings" in globals():
-            styled = view_wl[cols].style.apply(_style_earnings, subset=["Earnings"])
-            if "_style_scorefinal" in globals() and "ScoreFinal" in cols:
-                styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
-            st.dataframe(styled, use_container_width=True, height=520)
-        else:
-            st.dataframe(view_wl[cols], use_container_width=True, height=520)
-
-        st.download_button(
-            "💾 Export CSV (watchlist)",
-            data=view_wl[cols].to_csv(index=False).encode("utf-8"),
-            file_name="watchlist_from_fullscan.csv",
-            mime="text/csv",
+        render_results_table(
+            df=view_wl,
+            profile=profile,
+            title="📊 Ma watchlist (extrait du scan du jour)",
+            hide_before_n=hide_before_n_wl,
+            allow_delete=True,
         )
 
-        st.caption("🗑️ Retirer de la watchlist :")
-        cols_rm = st.columns(min(5, max(1, len(view_wl))))
-        for i, (_, row) in enumerate(view_wl.iterrows()):
-            if i < len(cols_rm):
-                with cols_rm[i]:
-                    if st.button(f"🗑️ {row['Ticker']}", key=f"rmwl_{row['Ticker']}"):
-                        mask = ~my_wl["ticker"].astype(str).str.upper().eq(row["Ticker"])
-                        updated = my_wl[mask].reset_index(drop=True)
-                        save_my_watchlist(updated)
-                        st.session_state["my_watchlist"] = [
-                            str(t).upper().strip()
-                            for t in updated["ticker"].astype(str).tolist()
-                            if str(t).strip()
-                        ]
-                        st.experimental_rerun()
+        updated_wl_list = [
+            str(t).upper().strip()
+            for t in st.session_state.get("my_watchlist", [])
+            if str(t).strip()
+        ]
+        if set(updated_wl_list) != set(my_wl_list):
+            wl_df = load_my_watchlist()
+            if not wl_df.empty and "ticker" in wl_df.columns:
+                wl_df = wl_df[
+                    wl_df["ticker"].astype(str).str.upper().isin(updated_wl_list)
+                ].copy()
+                order = {t: i for i, t in enumerate(updated_wl_list)}
+                wl_df["__ord__"] = (
+                    wl_df["ticker"].astype(str).str.upper().map(order)
+                )
+                wl_df = wl_df.sort_values("__ord__").drop(columns="__ord__")
+            else:
+                wl_df = normalize_cols(
+                    pd.DataFrame(columns=["isin", "ticker", "name", "market"])
+                )
+            save_my_watchlist(wl_df)
+            my_wl = wl_df
+            my_wl_list = updated_wl_list
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
 
@@ -1446,53 +1493,22 @@ with tab_full:
             if avg_score is not None:
                 st.caption(f"ScoreFinal moyen : {avg_score:.2f}")
 
-        with card("📊 Résultats du scan (cache du jour)"):
-            cols_main = [
-                "Ticker",
-                "Name",
-                "Market",
-                "Signal",
-                "ScoreFinal",
-                "ScoreTech",
-                "FscoreFund",
-                "%toHH52",
-                "Earnings",
-            ]
-            if profile != "Investisseur" and "RSI" in view.columns:
-                cols_main.insert(cols_main.index("%toHH52"), "RSI")
+        render_results_table(
+            df=view,
+            profile=profile,
+            title="📊 Résultats du scan",
+            hide_before_n=hide_before_n,
+            allow_delete=False,
+        )
 
-            present = [c for c in cols_main if c in view.columns]
-            display_view = rename_score_for_display(view)
-            display_cols = map_score_column(present)
-            display_cols = [c for c in display_cols if c in display_view.columns]
-            main_df = display_view[display_cols] if display_cols else display_view
-
-            score_col = map_score_column(["Score"])[0]
-            if not main_df.empty:
-                styled = main_df.style
-                if "ScoreFinal" in main_df.columns:
-                    styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
-                if score_col in main_df.columns:
-                    styled = styled.apply(_color_score, subset=[score_col])
-                st.dataframe(styled, use_container_width=True, height=520)
+        with st.expander("🔎 Détails techniques (colonnes supplémentaires)"):
+            extra_cols = ["MACD_hist", "VolZ20"]
+            extra_present = [c for c in extra_cols if c in view.columns]
+            if extra_present:
+                extra_df = view[["Ticker", "Name", "Market"] + extra_present]
+                st.dataframe(extra_df, use_container_width=True)
             else:
-                st.dataframe(main_df, use_container_width=True, height=520)
-
-            with st.expander("🔎 Détails techniques (colonnes supplémentaires)"):
-                extra_cols = ["MACD_hist", "VolZ20"]
-                extra_present = [c for c in extra_cols if c in view.columns]
-                if extra_present:
-                    extra_df = view[["Ticker", "Name", "Market"] + extra_present]
-                    st.dataframe(extra_df, use_container_width=True)
-                else:
-                    st.caption("Aucune colonne technique additionnelle disponible.")
-
-            st.download_button(
-                "💾 Export CSV (vue filtrée)",
-                data=view.to_csv(index=False).encode("utf-8"),
-                file_name="full_scan_view.csv",
-                mime="text/csv",
-            )
+                st.caption("Aucune colonne technique additionnelle disponible.")
         # --- Bloc 4 : Watchlist (gestion) ---
         with card("⭐ Ma Watchlist"):
             st.caption(
