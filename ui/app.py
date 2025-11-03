@@ -19,6 +19,39 @@ import requests
 import traceback
 import yfinance as yf
 
+PRECOMP_FILES = {
+    "Investisseur": (
+        "data/daily_scan_investisseur.parquet",
+        "data/daily_scan_investisseur.json",
+    ),
+    "Swing": (
+        "data/daily_scan_swing.parquet",
+        "data/daily_scan_swing.json",
+    ),
+}
+
+
+def load_precomputed_for_profile(profile: str) -> tuple[pd.DataFrame, str]:
+    pq, js = PRECOMP_FILES.get(profile, (None, None))
+    ts = "—"
+    if pq and os.path.exists(pq):
+        df = pd.read_parquet(pq)
+        if js and os.path.exists(js):
+            try:
+                with open(js, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                ts = meta.get("generated_at_utc", "—")
+            except Exception:
+                pass
+        return df, ts
+    return pd.DataFrame(), ts
+
+
+def cache_full_scan_in_session(profile: str, df: pd.DataFrame, ts: str):
+    key = f"{_today_paris_str()}|{profile}"
+    st.session_state.setdefault("daily_full_scan", {})
+    st.session_state["daily_full_scan"][key] = {"df": df, "ts": ts}
+
 # --- Colonnes standard (identiques pour scan & watchlist) ---
 def main_table_columns(profile: str, df_cols: list[str]) -> list[str]:
     base = [
@@ -141,27 +174,6 @@ def render_results_table(
                         ]
                         st.session_state["my_watchlist"] = wl
                         st.experimental_rerun()
-
-
-PRECOMPUTED_PARQUET = "data/daily_scan_latest.parquet"
-PRECOMPUTED_META = "data/daily_scan_latest.json"
-
-
-def _load_precomputed_df() -> tuple[pd.DataFrame, str]:
-    """Charge le parquet/json pré-calculés; renvoie (df, horodatage lisible)."""
-
-    ts = "—"
-    if os.path.exists(PRECOMPUTED_PARQUET):
-        df = pd.read_parquet(PRECOMPUTED_PARQUET)
-        if os.path.exists(PRECOMPUTED_META):
-            try:
-                with open(PRECOMPUTED_META, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                ts = meta.get("generated_at_utc", "—")
-            except Exception:
-                pass
-        return df, ts
-    return pd.DataFrame(), ts
 
 
 def _daily_cache_key(profile: str) -> str:
@@ -287,7 +299,7 @@ def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
 
 
 def run_full_scan_all_and_cache_ui(profile: str, max_workers: int = 8) -> pd.DataFrame:
-    """Exécute le scan complet avec barre de progression et met à jour le cache."""
+    """Exécute le scan complet avec barre de progression et renvoie le DataFrame."""
 
     uni = get_universe_normalized()
     tickers = (
@@ -351,9 +363,6 @@ def run_full_scan_all_and_cache_ui(profile: str, max_workers: int = 8) -> pd.Dat
             by=["ScoreFinal", "Ticker"], ascending=[False, True]
         ).reset_index(drop=True)
 
-    key = _daily_cache_key(profile)
-    st.session_state.setdefault("daily_full_scan", {})
-    st.session_state["daily_full_scan"][key] = {"df": out, "ts": _now_paris_str()}
     return out
 
 
@@ -1217,7 +1226,7 @@ with tab_scan:
         st.caption(f"Tickers suivis ({len(my_wl_list)}) : {my_wl_display}")
     with colB:
         refresh_full = st.button(
-            "🔄 Rafraîchir le SCAN COMPLET",
+            "🔄 Rafraîchir (scan manuel)",
             use_container_width=True,
             key="refresh_full_scan_watchlist",
         )
@@ -1232,12 +1241,14 @@ with tab_scan:
 
     if refresh_full:
         compute_full_scan_cached.clear() if "compute_full_scan_cached" in globals() else None
-        _ = run_full_scan_all_and_cache_ui(profile)
+        out_manual = run_full_scan_all_and_cache_ui(profile)
+        if isinstance(out_manual, pd.DataFrame) and not out_manual.empty:
+            cache_full_scan_in_session(profile, out_manual, _now_paris_str())
 
     full_today = _get_full_scan_df_for_today(profile)
     if full_today.empty:
         st.info(
-            "⚠️ Aucun scan du jour en cache. Lance ‘🚀 Scanner complet’ ou ‘🔄 Rafraîchir le SCAN COMPLET’."
+            "⚠️ Aucun scan du jour en cache. Lance ‘🚀 Scanner complet’ ou ‘🔄 Rafraîchir (scan manuel)’."
         )
         view_wl = pd.DataFrame()
     else:
@@ -1382,6 +1393,18 @@ with tab_full:
     score_label = get_score_label()
     cache_key = _daily_cache_key(profile)
 
+    if (
+        "daily_full_scan" not in st.session_state
+        or cache_key not in st.session_state["daily_full_scan"]
+    ):
+        df_pre, ts = load_precomputed_for_profile(profile)
+        if not df_pre.empty:
+            cache_full_scan_in_session(profile, df_pre, ts)
+        else:
+            st.warning(
+                "⚠️ Pas de fichier pré-calculé pour ce profil aujourd’hui. Clique sur 🔄 Rafraîchir pour lancer un scan manuel."
+            )
+
     # --- Univers normalisé ---
     uni = get_universe_normalized().copy()
     uni["market_norm"] = uni["market"].apply(_norm_market)
@@ -1418,41 +1441,25 @@ with tab_full:
                 help="0 = ne rien masquer",
             )
         with c4:
-            refresh = st.button(
-                "🔄 Rafraîchir le SCAN COMPLET", use_container_width=True
-            )
+            refresh = st.button("🔄 Rafraîchir (scan manuel)", use_container_width=True)
         st.caption(
             "Astuce : le scan complet est mis en cache pour la journée. Utilise 🔄 Rafraîchir pour lancer un nouveau calcul."
         )
 
-    profile = st.session_state.get(PROFILE_KEY, "Investisseur")
-    cache_key = _daily_cache_key(profile)
-
-    if "daily_full_scan" not in st.session_state:
-        st.session_state["daily_full_scan"] = {}
-
-    if cache_key not in st.session_state["daily_full_scan"]:
-        df_pre, ts = _load_precomputed_df()
-        if not df_pre.empty:
-            st.session_state["daily_full_scan"][cache_key] = {
-                "df": df_pre.copy(),
-                "ts": ts,
-            }
-        else:
-            st.warning(
-                "Aucun fichier pré-calculé trouvé. Lance un '🔄 Rafraîchir' pour calculer un scan maintenant."
-            )
-
     if refresh:
-        _ = run_full_scan_all_and_cache_ui(profile)
+        out_manual = run_full_scan_all_and_cache_ui(profile)
+        if isinstance(out_manual, pd.DataFrame) and not out_manual.empty:
+            cache_full_scan_in_session(profile, out_manual, _now_paris_str())
 
     meta_today = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
     ts_last = meta_today.get("ts", "—")
 
     st.markdown(
         f"""
-<div style="background:#F0F4F8;padding:10px;border-radius:10px;margin-bottom:12px;">
-  <b>📅 Scan du jour</b> : {ts_last} · <b>Règles</b> : pré-calcul à 08:30 Paris · aucun scan au login · <b>🔄 Rafraîchir</b> pour recalculer
+<div style="background:#F0F4F8;padding:10px;border-radius:10px;margin:8px 0;">
+  🔒 <b>Règles de calcul</b> — Scan quotidien à <b>08:30 Europe/Paris</b> pour <b>{profile}</b> ·
+  <u>Aucun scan au login</u> · Cliquez sur <b>🔄 Rafraîchir</b> pour recalculer manuellement.
+  <br/>🕒 <b>Dernier scan chargé</b> : <code>{ts_last}</code>
 </div>
 """,
         unsafe_allow_html=True,
