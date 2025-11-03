@@ -132,14 +132,32 @@ def render_results_table(
 
     view = _round_numeric_cols(view, 2)
 
+    st.subheader(title)
+
+    hide_no_fund = st.checkbox(
+        "Masquer les valeurs sans fondamentaux disponibles",
+        value=False,
+        help="N’affiche pas les lignes où FscoreFund est indisponible (None).",
+        key=f"hide_no_fund_{hashlib.md5((title or '').encode('utf-8')).hexdigest()}",
+    )
+    if hide_no_fund and "FscoreFund" in view.columns:
+        view = view[~view["FscoreFund"].isna()].copy()
+
     cols = main_table_columns(profile, view.columns.tolist())
 
     if "ScoreFinal" in view.columns:
         view = view.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True]).reset_index(drop=True)
 
-    st.subheader(title)
+    view_display = view.copy()
 
-    styled = view[cols].style if len(cols) else view.style
+    def _fmt_blank(x):
+        return "—" if pd.isna(x) else x
+
+    for c in ["FscoreFund", "ScoreFinal", "ScoreTech"]:
+        if c in view_display.columns:
+            view_display[c] = view_display[c].apply(_fmt_blank)
+
+    styled = view_display[cols].style if len(cols) else view_display.style
     if "Earnings" in cols:
         styled = styled.apply(_style_earnings, subset=["Earnings"])
     if "ScoreFinal" in cols:
@@ -148,9 +166,11 @@ def render_results_table(
     st.dataframe(styled, use_container_width=True, height=520)
 
     export_key = f"export_{hashlib.md5((title or '').encode('utf-8')).hexdigest()}"
+    extras = [c for c in ["Ffund_valid"] if c in view.columns]
+    export_cols = cols + [c for c in extras if c not in cols]
     st.download_button(
         "💾 Export CSV (vue affichée)",
-        data=view[cols].to_csv(index=False).encode("utf-8"),
+        data=view[export_cols].to_csv(index=False).encode("utf-8"),
         file_name="scanner_view.csv",
         mime="text/csv",
         key=export_key,
@@ -415,7 +435,7 @@ from api.core.scoring import (  # noqa: E402
     compute_score_investor,
 )
 from api.core.fundamentals import (  # noqa: E402
-    compute_fscore_basic,
+    compute_fscore_continuous_safe,
     get_fundamentals,
 )
 
@@ -818,16 +838,20 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
 
     # --- FONDAMENTAUX (cache lru dans le module) ---
     fund = get_fundamentals(tkr)
-    fscore100, _ = compute_fscore_basic(fund)
+    fscore, fmeta = compute_fscore_continuous_safe(fund)
 
     raw_score = float(score) if score is not None else None
     tech100 = None if raw_score is None or np.isnan(raw_score) else max(0.0, min(100.0, (raw_score + 5.0) * 10.0))
     WEIGHT_TECH = 0.7
     WEIGHT_FUND = 0.3
-    if tech100 is None or np.isnan(tech100):
-        combo = fscore100
+    if fscore is None and (tech100 is None or np.isnan(tech100)):
+        combo = None
+    elif fscore is None:
+        combo = float(tech100)
+    elif tech100 is None or np.isnan(tech100):
+        combo = float(fscore)
     else:
-        combo = WEIGHT_TECH * tech100 + WEIGHT_FUND * fscore100
+        combo = WEIGHT_TECH * float(tech100) + WEIGHT_FUND * float(fscore)
 
     sig = signal_from_scorefinal(combo)
 
@@ -847,7 +871,7 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
 
     score_final_2 = _r2(combo) if "combo" in locals() else None
     score_tech_2 = _r2(tech100) if "tech100" in locals() else None
-    fscore_fund_2 = _r2(fscore100) if "fscore100" in locals() else None
+    fscore_fund_2 = _r2(fscore) if "fscore" in locals() else None
 
     return {
         "Ticker": tkr,
@@ -857,6 +881,7 @@ def score_ticker_cached(tkr: str, profile: str) -> dict:
         "Score": raw_score,
         "ScoreTech": score_tech_2,
         "FscoreFund": fscore_fund_2,
+        "Ffund_valid": (fmeta or {}).get("valid_metrics") if isinstance(fmeta, dict) else None,
         "ScoreFinal": score_final_2,
         "RSI": rsi_val,
         "MACD_hist": macd_h,
