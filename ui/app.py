@@ -29,6 +29,23 @@ def _round_numeric_cols(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
     return df
 
 
+def main_table_columns(profile: str, df_cols: list[str]) -> list[str]:
+    base = [
+        "Ticker",
+        "Name",
+        "Market",
+        "Signal",
+        "ScoreFinal",
+        "ScoreTech",
+        "FscoreFund",
+        "%toHH52",
+        "Earnings",
+    ]
+    if profile != "Investisseur" and "RSI" in df_cols:
+        base.insert(base.index("%toHH52"), "RSI")
+    return [c for c in base if c in df_cols]
+
+
 PRECOMPUTED_PARQUET = "data/daily_scan_latest.parquet"
 PRECOMPUTED_META = "data/daily_scan_latest.json"
 
@@ -62,23 +79,21 @@ def _get_full_scan_df_for_today(profile: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def _subset_watchlist_from_fullscan(
-    wl: list[str], full_df: pd.DataFrame
-) -> pd.DataFrame:
+def watchlist_view_from_fullscan(wl: list[str], full_df: pd.DataFrame) -> pd.DataFrame:
     if full_df is None or full_df.empty or not wl:
         return pd.DataFrame()
     wl_u = [str(t).upper().strip() for t in wl if str(t).strip()]
-    df = full_df.copy()
-    if "Ticker" not in df.columns:
-        return pd.DataFrame()
-    df = df[df["Ticker"].isin(wl_u)].copy()
+    df = full_df[full_df["Ticker"].isin(wl_u)].copy()
     order = {t: i for i, t in enumerate(wl_u)}
     df["__ord__"] = df["Ticker"].map(order)
-    df = df.sort_values(
-        by=["__ord__", "ScoreFinal", "Ticker"],
-        ascending=[True, False, True],
-    ).drop(columns="__ord__", errors="ignore")
-    return df
+    if "ScoreFinal" in df.columns:
+        df = df.sort_values(
+            by=["__ord__", "ScoreFinal", "Ticker"],
+            ascending=[True, False, True],
+        )
+    else:
+        df = df.sort_values(by="__ord__")
+    return df.drop(columns="__ord__", errors="ignore")
 
 
 @contextlib.contextmanager
@@ -1088,8 +1103,7 @@ with tab_scan:
     st.title("Scanner — Ma watchlist (perso)")
     my_wl = load_my_watchlist()
     uni = load_universe()
-    score_label = get_score_label()
-    profile_current = get_analysis_profile()
+    
 
     with st.expander("📥 Ajouter depuis la base (nom / ISIN / ticker)", expanded=True):
         q = st.text_input("Rechercher dans la base", "")
@@ -1116,7 +1130,6 @@ with tab_scan:
             st.info("Tape un nom, un ISIN ou un ticker pour rechercher dans la base.")
 
     st.divider()
-    profile_current = st.session_state.get(PROFILE_KEY, "Investisseur")
     my_wl_list = []
     if not my_wl.empty and "ticker" in my_wl.columns:
         my_wl_list = [
@@ -1124,11 +1137,21 @@ with tab_scan:
             for t in my_wl["ticker"].astype(str).tolist()
             if str(t).strip()
         ]
-    tickers_caption = ", ".join(my_wl_list) if my_wl_list else "—"
+
+    # ===================== ⭐ MA WATCHLIST (extrait du SCAN du jour) =====================
+    profile = st.session_state.get(PROFILE_KEY, "Investisseur")
+    my_wl_state = st.session_state.get("my_watchlist", [])
+    if not my_wl_list and my_wl_state:
+        my_wl_list = my_wl_state
+    else:
+        st.session_state["my_watchlist"] = my_wl_list.copy()
+    my_wl_display = ", ".join(my_wl_list) if my_wl_list else "—"
+
     st.markdown("### ⭐ Ma Watchlist")
+
     colA, colB, colC = st.columns([2, 1, 1])
     with colA:
-        st.caption(f"Tickers ({len(my_wl_list)}) : {tickers_caption}")
+        st.caption(f"Tickers suivis ({len(my_wl_list)}) : {my_wl_display}")
     with colB:
         refresh_full = st.button(
             "🔄 Rafraîchir le SCAN COMPLET",
@@ -1141,68 +1164,74 @@ with tab_scan:
             [0, 1, 2, 3, 5, 7, 14],
             index=0,
             key="watchlist_hide_earnings_days",
+            help="0 = ne rien masquer",
         )
 
     if refresh_full:
-        _ = run_full_scan_all_and_cache_ui(profile_current)
+        compute_full_scan_cached.clear() if "compute_full_scan_cached" in globals() else None
+        _ = run_full_scan_all_and_cache_ui(profile)
 
-    full_today = _get_full_scan_df_for_today(profile_current)
+    full_today = _get_full_scan_df_for_today(profile)
     if full_today.empty:
-        st.info("⚠️ Lance d’abord un ‘Scan complet’ ou clique sur ‘🔄 Rafraîchir’.")
-        view = pd.DataFrame()
+        st.info(
+            "⚠️ Aucun scan du jour en cache. Lance ‘🚀 Scanner complet’ ou ‘🔄 Rafraîchir le SCAN COMPLET’."
+        )
+        view_wl = pd.DataFrame()
     else:
-        view = _subset_watchlist_from_fullscan(my_wl_list, full_today)
-        if not view.empty and "EarningsD" in view.columns and hide_before_n_wl:
-            if hide_before_n_wl > 0:
-                view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n_wl)]
-        view = _round_numeric_cols(view, 2)
+        view_wl = watchlist_view_from_fullscan(my_wl_list, full_today)
 
-    if view is not None and not view.empty:
-        cols_main = [
-            "Ticker",
-            "Name",
-            "Market",
-            "Signal",
-            "ScoreFinal",
-            "ScoreTech",
-            "FscoreFund",
-            "%toHH52",
-            "Earnings",
-        ]
-        if profile_current != "Investisseur" and "RSI" in view.columns:
-            cols_main.insert(cols_main.index("%toHH52"), "RSI")
-        present = [c for c in cols_main if c in view.columns]
-        view = view.sort_values(
-            by=["ScoreFinal", "Ticker"],
-            ascending=[False, True],
-        ).reset_index(drop=True)
-        display_view = rename_score_for_display(view)
-        display_cols = map_score_column(present)
-        display_cols = [c for c in display_cols if c in display_view.columns]
-        main_df = display_view[display_cols] if display_cols else display_view
-        st.subheader("📊 Résultats watchlist (extraits du scan du jour)")
-        st.dataframe(main_df, use_container_width=True, height=520)
+    if view_wl.empty:
+        st.info(
+            "Votre watchlist est vide ou aucun de ses tickers n’est présent dans le scan du jour."
+        )
+    else:
+        if "EarningsD" in view_wl.columns and hide_before_n_wl and hide_before_n_wl > 0:
+            view_wl = view_wl[
+                (view_wl["EarningsD"].isna()) | (view_wl["EarningsD"] >= hide_before_n_wl)
+            ]
+
+        if "%toHH52" in view_wl.columns:
+            view_wl["%toHH52"] = pd.to_numeric(view_wl["%toHH52"], errors="coerce")
+        view_wl = _round_numeric_cols(view_wl, 2)
+
+        cols = main_table_columns(profile, view_wl.columns.tolist())
+        if "ScoreFinal" in view_wl.columns:
+            view_wl = view_wl.sort_values(
+                by=["ScoreFinal", "Ticker"], ascending=[False, True]
+            ).reset_index(drop=True)
+
+        st.subheader("📊 Résultats (watchlist) — mêmes colonnes que le SCAN")
+
+        if "Earnings" in cols and "_style_earnings" in globals():
+            styled = view_wl[cols].style.apply(_style_earnings, subset=["Earnings"])
+            if "_style_scorefinal" in globals() and "ScoreFinal" in cols:
+                styled = styled.apply(_style_scorefinal, subset=["ScoreFinal"])
+            st.dataframe(styled, use_container_width=True, height=520)
+        else:
+            st.dataframe(view_wl[cols], use_container_width=True, height=520)
+
         st.download_button(
-            "💾 Export CSV (watchlist filtrée)",
-            data=view.to_csv(index=False).encode("utf-8"),
-            file_name="watchlist_scan_view.csv",
+            "💾 Export CSV (watchlist)",
+            data=view_wl[cols].to_csv(index=False).encode("utf-8"),
+            file_name="watchlist_from_fullscan.csv",
             mime="text/csv",
         )
+
         st.caption("🗑️ Retirer de la watchlist :")
-        cols_rm = st.columns(min(5, max(1, len(view))))
-        for i, (_, row) in enumerate(view.iterrows()):
+        cols_rm = st.columns(min(5, max(1, len(view_wl))))
+        for i, (_, row) in enumerate(view_wl.iterrows()):
             if i < len(cols_rm):
                 with cols_rm[i]:
-                    if st.button(
-                        f"🗑️ {row['Ticker']}",
-                        key=f"rmwl_{row['Ticker']}",
-                    ):
+                    if st.button(f"🗑️ {row['Ticker']}", key=f"rmwl_{row['Ticker']}"):
                         mask = ~my_wl["ticker"].astype(str).str.upper().eq(row["Ticker"])
                         updated = my_wl[mask].reset_index(drop=True)
                         save_my_watchlist(updated)
+                        st.session_state["my_watchlist"] = [
+                            str(t).upper().strip()
+                            for t in updated["ticker"].astype(str).tolist()
+                            if str(t).strip()
+                        ]
                         st.experimental_rerun()
-    else:
-        st.info("Votre watchlist est vide ou aucun de ses tickers n’est présent dans le scan du jour.")
     st.markdown("---")
     st.subheader("💾 Persistance GitHub — Ma watchlist")
 
