@@ -5,17 +5,16 @@ import time
 from datetime import datetime, timezone
 
 import pandas as pd
-import yfinance as yf
 
-# Accès aux modules du repo
+# Accès aux modules locaux
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from ui.app import get_universe_normalized  # réutilise ton loader d'univers
-from ui.app import score_ticker_cached      # réutilise ta fonction de scoring par ticker
+from ui.app import score_ticker_cached, get_universe_normalized  # réutilise tes fonctions
 
-PROFILE = os.getenv("PROFILE", "Investisseur")
-OUT_PARQUET = os.getenv("OUT_PARQUET", "data/daily_scan_latest.parquet")
-OUT_JSON = os.getenv("OUT_JSON", "data/daily_scan_latest.json")
+PROFILE = os.getenv("PROFILE", "Investisseur")  # "Investisseur" ou "Swing"
+
+OUT_PARQUET = f"data/daily_scan_{PROFILE.lower()}.parquet"
+OUT_JSON = f"data/daily_scan_{PROFILE.lower()}.json"
 
 
 def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
@@ -23,8 +22,10 @@ def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
 
     uni = get_universe_normalized()
     tickers = uni["ticker"].astype(str).str.upper().dropna().unique().tolist()
-    rows, failures = [], []
+    if not tickers:
+        return pd.DataFrame()
 
+    rows = []
     max_workers = min(max_workers, max(2, (os.cpu_count() or 4) * 2))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(score_ticker_cached, t, profile): t for t in tickers}
@@ -32,18 +33,15 @@ def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
             res = fut.result()
             if isinstance(res, dict) and not res.get("error"):
                 rows.append(res)
-            else:
-                failures.append(res)
 
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
 
-    # Normalisations d'affichage
+    # Normalisations affichage
     if "%toHH52" in df.columns:
         df["%toHH52"] = pd.to_numeric(df["%toHH52"], errors="coerce") * 100
-        df["%toHH52"] = df["%toHH52"].round(1)
     if "Market" in df.columns:
         df["Market"] = df["Market"].astype(str).str.strip().str.upper()
 
@@ -68,7 +66,9 @@ def compute_full_scan_df(profile: str, max_workers: int = 8) -> pd.DataFrame:
     ]
     df = df[[c for c in keep if c in df.columns]]
     if "ScoreFinal" in df.columns:
-        df = df.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True]).reset_index(drop=True)
+        df = df.sort_values(by=["ScoreFinal", "Ticker"], ascending=[False, True]).reset_index(
+            drop=True
+        )
     return df
 
 
@@ -76,10 +76,10 @@ def main():
     t0 = time.time()
     df = compute_full_scan_df(PROFILE)
     if df.empty:
-        print("No rows computed", file=sys.stderr)
+        print("No data produced")
         sys.exit(1)
 
-    os.makedirs(os.path.dirname(OUT_PARQUET), exist_ok=True)
+    os.makedirs("data", exist_ok=True)
     df.to_parquet(OUT_PARQUET, index=False)
 
     meta = {
@@ -91,9 +91,7 @@ def main():
     with open(OUT_JSON, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(
-        f"✅ Precomputed scan saved: {OUT_PARQUET} ({len(df)} rows) in {time.time()-t0:.1f}s"
-    )
+    print(f"✅ {PROFILE}: {OUT_PARQUET} written in {time.time()-t0:.1f}s")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-name: Daily Precompute Scan
+name: Daily Precompute Scans (Investor & Swing)
 
 on:
   schedule:
-    # 07:30 UTC ≈ 08:30 Paris (hiver) / 09:30 (été)
+    # 07:30 UTC ≈ 08:30 Paris en heure d'hiver (≈ 09:30 en été)
     - cron: "30 7 * * *"
   workflow_dispatch: {}
 
@@ -10,8 +10,11 @@ permissions:
   contents: write
 
 jobs:
-  build-scan:
+  precompute:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [Investisseur, Swing]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,9 +29,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Precompute full scan
+      - name: Precompute ${{ matrix.profile }} scan
         env:
-          PROFILE: Investisseur
+          PROFILE: ${{ matrix.profile }}
         run: |
           python scripts/precompute_scan.py
 
@@ -36,6 +39,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/daily_scan_latest.parquet data/daily_scan_latest.json
-          git commit -m "chore(data): daily precomputed scan at $(date -u +\"%Y-%m-%dT%H:%M:%SZ\")" || echo "No changes"
+          git add data/daily_scan_investisseur.parquet data/daily_scan_investisseur.json \
+                  data/daily_scan_swing.parquet        data/daily_scan_swing.json
+          git commit -m "chore(data): daily precomputed scans at $(date -u +\"%Y-%m-%dT%H:%M:%SZ\")" || echo "No changes"
           git push
