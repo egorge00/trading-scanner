@@ -20,6 +20,101 @@ import requests
 import traceback
 import yfinance as yf
 
+
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _as_str_date(d):
+    try:
+        return pd.to_datetime(d).date().isoformat()
+    except Exception:
+        return None
+
+
+def _last_notna(series: pd.Series):
+    try:
+        return series.dropna().iloc[-1]
+    except Exception:
+        return None
+
+
+def _compute_daily_kpis_for_audit(df: pd.DataFrame) -> dict:
+    """
+    Minimal: recalcul local des indicateurs techniques utilisés par le score (mêmes définitions que compute_kpis).
+    Entrée: df = OHLCV daily (yfinance) avec colonnes ['Open','High','Low','Close','Adj Close','Volume'].
+    Retour: dict de valeurs scalaires (dernière observation).
+    """
+
+    out = {}
+
+    if df is None or df.empty or "Close" not in df.columns:
+        return out
+
+    # RSI(14) (EWMA pour robustesse)
+    delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    roll_up = up.ewm(span=14, adjust=False).mean()
+    roll_down = down.ewm(span=14, adjust=False).mean()
+    rs = roll_up / roll_down
+    rsi = 100 - (100 / (1 + rs))
+    out["RSI14"] = _safe_float(_last_notna(rsi))
+
+    # MACD (12,26,9) histogramme
+    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    out["MACD_hist"] = _safe_float(_last_notna(hist))
+
+    # SMA50 / SMA200 + relation
+    sma50 = df["Close"].rolling(50).mean()
+    sma200 = df["Close"].rolling(200).mean()
+    out["SMA50"] = _safe_float(_last_notna(sma50))
+    out["SMA200"] = _safe_float(_last_notna(sma200))
+    if out["SMA50"] is not None and out["SMA200"] is not None:
+        out["SMA50_gt_SMA200"] = bool(out["SMA50"] > out["SMA200"])
+    else:
+        out["SMA50_gt_SMA200"] = None
+
+    # Plus haut 52 semaines
+    # 252 séances ≈ 52 semaines boursières
+    hh52 = df["Close"].rolling(252).max()
+    out["High_52w"] = _safe_float(_last_notna(hh52))
+    if out["High_52w"] and "Close" in df.columns:
+        last_close = _safe_float(_last_notna(df["Close"]))
+        out["pct_to_High52w"] = _safe_float((last_close / out["High_52w"] - 1.0) if (last_close and out["High_52w"]) else None)
+    else:
+        out["pct_to_High52w"] = None
+
+    # Z-Score Volume(20)
+    if "Volume" in df.columns:
+        vol20 = df["Volume"].rolling(20)
+        mu = vol20.mean()
+        sd = vol20.std(ddof=0)
+        z = (df["Volume"] - mu) / sd
+        out["Vol_Z20"] = _safe_float(_last_notna(z))
+        out["Volume_last"] = _safe_float(_last_notna(df["Volume"]))
+    else:
+        out["Vol_Z20"] = None
+        out["Volume_last"] = None
+
+    # Clôture courante
+    out["Close_last"] = _safe_float(_last_notna(df["Close"]))
+
+    # Date de la dernière barre
+    try:
+        out["Last_bar_date"] = _as_str_date(df.index[-1])
+    except Exception:
+        out["Last_bar_date"] = None
+
+    return out
+
 PRECOMP_DIR = Path("data")
 PRECOMP_MAP = {
     "Investisseur": ("data/daily_scan_investisseur.parquet", "data/daily_scan_investisseur.json"),
@@ -1193,43 +1288,93 @@ tab_full, tab_single, tab_pos = st.tabs(
 # --------- Onglet FICHE ---------
 with tab_single:
     st.title("Fiche valeur (analyse individuelle)")
-    ticker_input = st.text_input("Ticker Yahoo Finance", "AAPL")
-    nm = get_name_for_ticker(ticker_input)
-    if nm:
-        st.caption(f"**{nm}**")
     profile = get_analysis_profile()
     score_label = get_score_label()
+    ticker_default = st.session_state.get("ticker_fiche_valeur", "AAPL")
+    tkr = st.text_input(
+        "Ticker (Yahoo Finance)", value=ticker_default, key="ticker_fiche_valeur"
+    )
+    ticker_input = _norm_ticker(tkr)
+    nm = get_name_for_ticker(ticker_input) if ticker_input else None
+    if nm:
+        st.caption(f"**{nm}**")
+
     if ticker_input:
         try:
             period = "36mo" if profile == "Investisseur" else "9mo"
-            df = safe_yf_download(_norm_ticker(ticker_input), period=period, interval="1d")
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            if df.empty or "Close" not in df.columns:
+            df_price = safe_yf_download(ticker_input, period=period, interval="1d")
+            if isinstance(df_price.columns, pd.MultiIndex):
+                df_price.columns = df_price.columns.get_level_values(0)
+            if df_price.empty or "Close" not in df_price.columns:
                 st.warning("Pas de données utilisables.")
             else:
                 if profile == "Investisseur":
-                    score, signal = compute_score_investor(df)
-                    kpis_lt = compute_kpis_investor(df)
-                    st.subheader(f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}")
-                    last = kpis_lt.iloc[-1] if not kpis_lt.empty else pd.Series(dtype="float64")
+                    score, signal = compute_score_investor(df_price)
+                    kpis_lt = compute_kpis_investor(df_price)
+                    has_kpis_lt = isinstance(kpis_lt, pd.DataFrame) and not kpis_lt.empty
+                    st.subheader(
+                        f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}"
+                    )
+                    last = (
+                        kpis_lt.iloc[-1]
+                        if has_kpis_lt
+                        else pd.Series(dtype="float64")
+                    )
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("SMA26w", f"{float(last.get('SMA26w', np.nan)):.2f}" if not kpis_lt.empty else "–")
-                        st.metric("SMA52w", f"{float(last.get('SMA52w', np.nan)):.2f}" if not kpis_lt.empty else "–")
+                        st.metric(
+                            "SMA26w",
+                            f"{float(last.get('SMA26w', np.nan)):.2f}"
+                            if has_kpis_lt
+                            else "–",
+                        )
+                        st.metric(
+                            "SMA52w",
+                            f"{float(last.get('SMA52w', np.nan)):.2f}"
+                            if has_kpis_lt
+                            else "–",
+                        )
                     with col2:
-                        pct_hh = float(last.get("%toHH52w", np.nan)) if not kpis_lt.empty else np.nan
-                        st.metric("% to 52w High", f"{pct_hh*100:.2f}%" if not np.isnan(pct_hh) else "–")
-                        mom = float(last.get("MOM_12m_minus_1m", np.nan)) if not kpis_lt.empty else np.nan
-                        st.metric("Momentum 12-1", f"{mom*100:.2f}%" if not np.isnan(mom) else "–")
+                        pct_hh = (
+                            float(last.get("%toHH52w", np.nan))
+                            if has_kpis_lt
+                            else np.nan
+                        )
+                        st.metric(
+                            "% to 52w High",
+                            f"{pct_hh*100:.2f}%" if not np.isnan(pct_hh) else "–",
+                        )
+                        mom = (
+                            float(last.get("MOM_12m_minus_1m", np.nan))
+                            if has_kpis_lt
+                            else np.nan
+                        )
+                        st.metric(
+                            "Momentum 12-1",
+                            f"{mom*100:.2f}%" if not np.isnan(mom) else "–",
+                        )
                     with col3:
-                        rv = float(last.get("RV20w", np.nan)) if not kpis_lt.empty else np.nan
-                        st.metric("Volatilité 20w", f"{rv:.2%}" if not np.isnan(rv) else "–")
-                        dd = float(last.get("DD26w", np.nan)) if not kpis_lt.empty else np.nan
-                        st.metric("Drawdown 26w", f"{dd*100:.2f}%" if not np.isnan(dd) else "–")
+                        rv = (
+                            float(last.get("RV20w", np.nan))
+                            if has_kpis_lt
+                            else np.nan
+                        )
+                        st.metric(
+                            "Volatilité 20w",
+                            f"{rv:.2%}" if not np.isnan(rv) else "–",
+                        )
+                        dd = (
+                            float(last.get("DD26w", np.nan))
+                            if has_kpis_lt
+                            else np.nan
+                        )
+                        st.metric(
+                            "Drawdown 26w",
+                            f"{dd*100:.2f}%" if not np.isnan(dd) else "–",
+                        )
                 else:
-                    kpis = compute_kpis(df)
-                    cs = compute_score(df)
+                    kpis = compute_kpis(df_price)
+                    cs = compute_score(df_price)
                     score = np.nan
                     signal = None
                     if isinstance(cs, (list, tuple)):
@@ -1237,29 +1382,225 @@ with tab_single:
                         signal = cs[1] if len(cs) >= 2 else None
                     else:
                         score = cs
-                    st.subheader(f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}")
-                    last = kpis.iloc[-1] if not kpis.empty else pd.Series(dtype="float64")
+                    st.subheader(
+                        f"{ticker_input} — {score_label}: {score:.2f} | Signal: {signal}"
+                    )
+                    last = (
+                        kpis.iloc[-1]
+                        if isinstance(kpis, pd.DataFrame) and not kpis.empty
+                        else pd.Series(dtype="float64")
+                    )
+                    has_kpis = isinstance(kpis, pd.DataFrame) and not kpis.empty
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("RSI(14)", f"{float(last.get('RSI', np.nan)):.1f}" if not kpis.empty else "–")
-                        st.metric("MACD hist", f"{float(last.get('MACD_hist', np.nan)):.3f}" if not kpis.empty else "–")
+                        st.metric(
+                            "RSI(14)",
+                            f"{float(last.get('RSI', np.nan)):.1f}"
+                            if has_kpis
+                            else "–",
+                        )
+                        st.metric(
+                            "MACD hist",
+                            f"{float(last.get('MACD_hist', np.nan)):.3f}"
+                            if has_kpis
+                            else "–",
+                        )
                     with col2:
                         st.metric(
                             "Close > SMA50",
-                            "✅" if float(last.get("Close", np.nan)) > float(last.get("SMA50", np.nan)) else "❌",
+                            "✅"
+                            if has_kpis
+                            and float(last.get("Close", np.nan))
+                            > float(last.get("SMA50", np.nan))
+                            else ("❌" if has_kpis else "–"),
                         )
                         st.metric(
                             "SMA50 > SMA200",
-                            "✅" if float(last.get("SMA50", np.nan)) > float(last.get("SMA200", np.nan)) else "❌",
+                            "✅"
+                            if has_kpis
+                            and float(last.get("SMA50", np.nan))
+                            > float(last.get("SMA200", np.nan))
+                            else ("❌" if has_kpis else "–"),
                         )
                     with col3:
-                        pct_hh = float(last.get("pct_to_HH52", np.nan)) * 100 if not kpis.empty else np.nan
-                        st.metric("% to 52w High", f"{pct_hh:.2f}%" if not np.isnan(pct_hh) else "–")
-                        volz = float(last.get("VolZ20", np.nan)) if not kpis.empty else np.nan
-                        st.metric("Vol Z20", f"{volz:.2f}" if not np.isnan(volz) else "–")
-                st.line_chart(df[["Close"]])
+                        pct_hh = (
+                            float(last.get("pct_to_HH52", np.nan)) * 100
+                            if has_kpis
+                            else np.nan
+                        )
+                        st.metric(
+                            "% to 52w High",
+                            f"{pct_hh:.2f}%" if not np.isnan(pct_hh) else "–",
+                        )
+                        volz = (
+                            float(last.get("VolZ20", np.nan))
+                            if has_kpis
+                            else np.nan
+                        )
+                        st.metric(
+                            "Vol Z20",
+                            f"{volz:.2f}" if not np.isnan(volz) else "–",
+                        )
+                st.line_chart(df_price[["Close"]])
         except Exception as e:
             st.error(f"Erreur : {e}")
+
+        st.markdown("### 🧾 Données utilisées pour le score (audit)")
+        try:
+            df = yf.download(
+                ticker_input,
+                period="18mo",
+                interval="1d",
+                group_by="column",
+                auto_adjust=False,
+                progress=False,
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                try:
+                    df.columns = [c if isinstance(c, str) else c[0] for c in df.columns]
+                except Exception:
+                    df = df.droplevel(level=1, axis=1)
+            needed = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            present = [c for c in needed if c in df.columns]
+            if not present:
+                st.error("Pas de colonnes OHLCV disponibles pour ce ticker.")
+                st.stop()
+
+            tech = _compute_daily_kpis_for_audit(df)
+
+            fund_raw = get_fundamentals(ticker_input)
+            fscore, _ = compute_fscore_continuous_safe(fund_raw)
+
+            edate, edays = None, None
+            try:
+                cal = yf.Ticker(ticker_input).calendar
+                if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+                    rawd = cal.loc["Earnings Date"].values[0]
+                    edate = _as_str_date(rawd)
+                    if edate:
+                        d0 = pd.Timestamp.today(tz="Europe/Paris").normalize()
+                        d1 = pd.to_datetime(edate)
+                        edays = int((d1 - d0).days)
+            except Exception:
+                pass
+
+            tech_rows = [
+                {"Champ": "Close_last", "Valeur": tech.get("Close_last"), "Source": "yf.download"},
+                {"Champ": "RSI14", "Valeur": tech.get("RSI14"), "Source": "yf.download"},
+                {"Champ": "MACD_hist", "Valeur": tech.get("MACD_hist"), "Source": "yf.download"},
+                {"Champ": "SMA50", "Valeur": tech.get("SMA50"), "Source": "yf.download"},
+                {"Champ": "SMA200", "Valeur": tech.get("SMA200"), "Source": "yf.download"},
+                {
+                    "Champ": "SMA50_gt_SMA200",
+                    "Valeur": tech.get("SMA50_gt_SMA200"),
+                    "Source": "dérivé (Close)",
+                },
+                {"Champ": "High_52w", "Valeur": tech.get("High_52w"), "Source": "yf.download"},
+                {
+                    "Champ": "pct_to_High52w",
+                    "Valeur": tech.get("pct_to_High52w"),
+                    "Source": "dérivé (Close, High_52w)",
+                },
+                {"Champ": "Vol_Z20", "Valeur": tech.get("Vol_Z20"), "Source": "yf.download"},
+                {"Champ": "Volume_last", "Valeur": tech.get("Volume_last"), "Source": "yf.download"},
+                {"Champ": "Last_bar_date", "Valeur": tech.get("Last_bar_date"), "Source": "yf.download"},
+            ]
+            df_tech = pd.DataFrame(tech_rows)
+
+            def _fmt_pct(x):
+                if x is None:
+                    return None
+                try:
+                    return round(100 * float(x), 2)
+                except Exception:
+                    return None
+
+            fund_rows = [
+                {
+                    "Champ": "eps_growth (YoY)",
+                    "Valeur": fund_raw.get("eps_growth"),
+                    "Valeur_%": _fmt_pct(fund_raw.get("eps_growth")),
+                    "Source": "Ticker.info['earningsGrowth'|'earningsQuarterlyGrowth']",
+                },
+                {
+                    "Champ": "revenue_growth (YoY)",
+                    "Valeur": fund_raw.get("revenue_growth"),
+                    "Valeur_%": _fmt_pct(fund_raw.get("revenue_growth")),
+                    "Source": "Ticker.info['revenueGrowth']",
+                },
+                {
+                    "Champ": "profit_margin (TTM)",
+                    "Valeur": fund_raw.get("profit_margin"),
+                    "Valeur_%": _fmt_pct(fund_raw.get("profit_margin")),
+                    "Source": "Ticker.info['profitMargins']",
+                },
+                {
+                    "Champ": "ROE (TTM)",
+                    "Valeur": fund_raw.get("roe"),
+                    "Valeur_%": _fmt_pct(fund_raw.get("roe")),
+                    "Source": "Ticker.info['returnOnEquity']",
+                },
+                {
+                    "Champ": "Debt/Equity",
+                    "Valeur": fund_raw.get("debt_to_equity"),
+                    "Valeur_%": None,
+                    "Source": "Ticker.info['debtToEquity']",
+                },
+                {
+                    "Champ": "FscoreFund (0-100)",
+                    "Valeur": fscore,
+                    "Valeur_%": None,
+                    "Source": "compute_fscore_continuous_safe(...)",
+                },
+            ]
+            df_fund = pd.DataFrame(fund_rows)
+
+            earn_rows = [
+                {
+                    "Champ": "Prochains earnings (date)",
+                    "Valeur": edate,
+                    "Source": "Ticker.calendar['Earnings Date']",
+                },
+                {
+                    "Champ": "Jours jusqu’aux earnings",
+                    "Valeur": edays,
+                    "Source": "calcul (date Paris vs earnings)",
+                },
+            ]
+            df_earn = pd.DataFrame(earn_rows)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("🔧 Technique (yf.download)")
+                st.dataframe(df_tech, use_container_width=True, height=380)
+            with c2:
+                st.subheader("🏦 Fondamental (Ticker.info)")
+                st.dataframe(df_fund, use_container_width=True, height=380)
+
+            st.subheader("📣 Earnings (contexte)")
+            st.dataframe(df_earn, use_container_width=True, height=120)
+
+            audit_payload = {
+                "ticker": ticker_input,
+                "profile": profile,
+                "tech": {r["Champ"]: r["Valeur"] for _, r in df_tech.iterrows()},
+                "fund": {r["Champ"]: r["Valeur"] for _, r in df_fund.iterrows()},
+                "earnings": {r["Champ"]: r["Valeur"] for _, r in df_earn.iterrows()},
+                "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            st.download_button(
+                "💾 Export JSON (données utilisées pour le score)",
+                data=json.dumps(audit_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"audit_score_inputs_{ticker_input}.json",
+                mime="application/json",
+            )
+
+            st.caption(
+                "ℹ️ Les valeurs '—' ou vides signifient que YFinance ne fournit pas la donnée pour ce titre."
+            )
+
+        except Exception as e:
+            st.error(f"Erreur dans la fiche valeur : {e}")
 
 # --------- Onglet 🚀 SCANNER COMPLET (univers) ---------
 
