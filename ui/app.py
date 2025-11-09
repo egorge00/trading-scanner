@@ -20,32 +20,56 @@ import requests
 import traceback
 import yfinance as yf
 
-PRECOMP_FILES = {
-    "Investisseur": (
-        "data/daily_scan_investisseur.parquet",
-        "data/daily_scan_investisseur.json",
-    ),
-    "Swing": (
-        "data/daily_scan_swing.parquet",
-        "data/daily_scan_swing.json",
-    ),
+PRECOMP_DIR = Path("data")
+PRECOMP_MAP = {
+    "Investisseur": ("data/daily_scan_investisseur.parquet", "data/daily_scan_investisseur.json"),
+    "Swing": ("data/daily_scan_swing.parquet", "data/daily_scan_swing.json"),
 }
 
 
-def load_precomputed_for_profile(profile: str) -> tuple[pd.DataFrame, str]:
-    pq, js = PRECOMP_FILES.get(profile, (None, None))
-    ts = "—"
-    if pq and os.path.exists(pq):
+def _list_data_dir() -> list[str]:
+    try:
+        return sorted([p.name for p in PRECOMP_DIR.iterdir() if p.is_file()])
+    except Exception:
+        return []
+
+
+def load_precomputed_for_profile(profile: str) -> tuple[pd.DataFrame, str, str]:
+    """Retourne (df, timestamp, diag)."""
+
+    pq, js = PRECOMP_MAP.get(profile, (None, None))
+    diag: list[str] = []
+
+    if pq is None:
+        return pd.DataFrame(), "—", "profile not in PRECOMP_MAP"
+
+    diag.append(f"looking for: {pq}")
+    if not os.path.exists(pq):
+        diag.append("parquet file missing")
+        return pd.DataFrame(), "—", " / ".join(diag)
+
+    try:
         df = pd.read_parquet(pq)
-        if js and os.path.exists(js):
-            try:
-                with open(js, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                ts = meta.get("generated_at_utc", "—")
-            except Exception:
-                pass
-        return df, ts
-    return pd.DataFrame(), ts
+        diag.append(f"parquet loaded, rows={len(df)} cols={list(df.columns)}")
+    except Exception as e:
+        return pd.DataFrame(), "—", f"parquet read failed: {e}"
+
+    ts = "—"
+    if js and os.path.exists(js):
+        try:
+            with open(js, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            ts = meta.get("generated_at_utc", "—")
+            diag.append(f"meta ok: {ts}")
+        except Exception as e:
+            diag.append(f"meta read failed: {e}")
+
+    need = {"Ticker", "Name", "Market", "Signal", "ScoreFinal"}
+    missing = need - set(df.columns)
+    if missing:
+        diag.append(f"missing required columns: {sorted(list(missing))}")
+
+    return df, ts, " / ".join(diag)
 
 
 def cache_full_scan_in_session(profile: str, df: pd.DataFrame, ts: str):
@@ -1247,16 +1271,17 @@ with tab_full:
 
     st.session_state.setdefault("daily_full_scan", {})
 
-    if (
-        cache_key not in st.session_state["daily_full_scan"]
-    ):
-        df_pre, ts = load_precomputed_for_profile(profile)
+    diag_details = ""
+    if cache_key not in st.session_state["daily_full_scan"]:
+        df_pre, ts, diag_details = load_precomputed_for_profile(profile)
         if not df_pre.empty:
             cache_full_scan_in_session(profile, df_pre, ts)
         else:
-            st.warning(
-                "⚠️ Pas de fichier pré-calculé pour ce profil aujourd’hui. Clique sur 🔄 Rafraîchir pour lancer un scan manuel."
-            )
+            st.warning("⚠️ Pas de fichier pré-calculé trouvé pour ce profil aujourd’hui.")
+            with st.expander("Diagnostics (pré-calcul)"):
+                st.write("Profil:", profile)
+                st.write("Data dir files:", _list_data_dir())
+                st.code(diag_details or "—")
 
     # --- Univers normalisé ---
     uni = get_universe_normalized().copy()
@@ -1304,24 +1329,22 @@ with tab_full:
         if isinstance(out_manual, pd.DataFrame) and not out_manual.empty:
             cache_full_scan_in_session(profile, out_manual, _now_paris_str())
 
-    meta_today = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
-    ts_last = meta_today.get("ts", "—")
+    meta = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
+    df = meta.get("df", pd.DataFrame())
+    ts = meta.get("ts", "—")
 
     st.markdown(
         f"""
 <div style="background:#F0F4F8;padding:10px;border-radius:10px;margin:8px 0;">
-  🔒 <b>Règles de calcul</b> — Scan quotidien à <b>08:30 Europe/Paris</b> pour <b>{profile}</b> ·
-  <u>Aucun scan au login</u> · Cliquez sur <b>🔄 Rafraîchir</b> pour recalculer manuellement.
-  <br/>🕒 <b>Dernier scan chargé</b> : <code>{ts_last}</code>
+  🔒 <b>Règles</b> — Scan quotidien à <b>08:30 Europe/Paris</b> (Investisseur & Swing). Aucun scan au login.
+  <br/>🕒 <b>Dernier scan chargé ({profile})</b> : <code>{ts}</code>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
-    meta = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
-    out = meta.get("df")
-    if isinstance(out, pd.DataFrame) and not out.empty:
-        view = out.copy()
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        view = df.copy()
         if selected_markets and selected_markets != markets_all:
             view = view[view["Market"].isin([m.upper() for m in selected_markets])]
 
@@ -1355,7 +1378,7 @@ with tab_full:
 
         view_scan = view.copy()
 
-        st.caption(f"🕒 Basé sur le scan du jour : {ts_last}")
+        st.caption(f"🕒 Basé sur le scan du jour : {ts}")
 
         render_results_table(
             df=view_scan,
