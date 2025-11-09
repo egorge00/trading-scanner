@@ -1,7 +1,7 @@
 streamlit
-yfinance
-pandas
-numpy
+yfinance>=0.2.43
+pandas>=2.2
+numpy>=1.26
 bcrypt
 requests
 pyarrow>=15
