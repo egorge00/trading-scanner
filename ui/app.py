@@ -21,6 +21,45 @@ import traceback
 import yfinance as yf
 
 
+USER_WL_PATH = Path("data/my_watchlist.csv")
+
+
+def load_user_watchlist() -> list[str]:
+    """Charge la watchlist utilisateur depuis data/my_watchlist.csv (si présent)."""
+
+    try:
+        if USER_WL_PATH.exists():
+            df = pd.read_csv(USER_WL_PATH)
+            col = None
+            for c in ["ticker", "Ticker", "symbol", "Symbol"]:
+                if c in df.columns:
+                    col = c
+                    break
+            if col is None:
+                s = pd.read_csv(USER_WL_PATH, header=None).iloc[:, 0]
+                return sorted(
+                    {str(x).upper().strip() for x in s if str(x).strip()}
+                )
+            return sorted(
+                {
+                    str(x).upper().strip()
+                    for x in df[col]
+                    if str(x).strip()
+                }
+            )
+    except Exception:
+        pass
+    return []
+
+
+def save_user_watchlist(tickers: list[str]) -> None:
+    """Sauvegarde la watchlist utilisateur dans data/my_watchlist.csv."""
+
+    USER_WL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    uniq = sorted({str(x).upper().strip() for x in tickers if str(x).strip()})
+    pd.DataFrame({"ticker": uniq}).to_csv(USER_WL_PATH, index=False)
+
+
 def _safe_float(x):
     try:
         return float(x)
@@ -320,6 +359,7 @@ def render_results_table(
                             if t != row["Ticker"]
                         ]
                         st.session_state["my_watchlist"] = wl
+                        save_user_watchlist(wl)
                         st.experimental_rerun()
 
 
@@ -772,12 +812,21 @@ def load_universe() -> pd.DataFrame:
 def load_my_watchlist() -> pd.DataFrame:
     if MY_WATCHLIST_KEY in st.session_state:
         return st.session_state[MY_WATCHLIST_KEY].copy()
-    df = normalize_cols(pd.DataFrame(columns=["isin","ticker","name","market"]))
+    tickers = load_user_watchlist()
+    if tickers:
+        df = normalize_cols(pd.DataFrame({"ticker": tickers}))
+    else:
+        df = normalize_cols(pd.DataFrame(columns=["isin","ticker","name","market"]))
     st.session_state[MY_WATCHLIST_KEY] = df.copy()
     return df
 
 def save_my_watchlist(df: pd.DataFrame):
-    st.session_state[MY_WATCHLIST_KEY] = normalize_cols(df)
+    df_norm = normalize_cols(df)
+    st.session_state[MY_WATCHLIST_KEY] = df_norm.copy()
+    if "ticker" in df_norm.columns:
+        save_user_watchlist(df_norm["ticker"].astype(str).tolist())
+    else:
+        save_user_watchlist([])
 
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
@@ -1674,6 +1723,10 @@ with tab_full:
     df = meta.get("df", pd.DataFrame())
     ts = meta.get("ts", "—")
 
+    # ---- Init 'my_watchlist' depuis fichier si absent en session ----
+    if "my_watchlist" not in st.session_state:
+        st.session_state["my_watchlist"] = load_user_watchlist()
+
     st.markdown(
         f"""
 <div style="background:#F0F4F8;padding:10px;border-radius:10px;margin:8px 0;">
@@ -1741,15 +1794,37 @@ with tab_full:
                 if str(t).strip()
             ]
 
-        my_wl_state = st.session_state.get("my_watchlist", [])
-        if not my_wl_list and my_wl_state:
-            my_wl_list = [
-                str(t).upper().strip()
-                for t in my_wl_state
-                if str(t).strip()
-            ]
+        my_wl_state = [
+            str(t).upper().strip()
+            for t in st.session_state.get("my_watchlist", [])
+            if str(t).strip()
+        ]
+        if my_wl_state and set(my_wl_state) != set(my_wl_list):
+            my_wl_list = my_wl_state[:]
+            if not my_wl_df.empty and "ticker" in my_wl_df.columns:
+                sync_df = my_wl_df[
+                    my_wl_df["ticker"].astype(str).str.upper().isin(my_wl_list)
+                ].copy()
+                order = {t: i for i, t in enumerate(my_wl_list)}
+                sync_df["__ord__"] = (
+                    sync_df["ticker"].astype(str).str.upper().map(order)
+                )
+                sync_df = sync_df.sort_values("__ord__").drop(columns="__ord__")
+            else:
+                sync_df = normalize_cols(pd.DataFrame({"ticker": my_wl_list}))
+            st.session_state[MY_WATCHLIST_KEY] = sync_df.copy()
+            my_wl_df = sync_df
+
+        seen = set()
+        ordered: list[str] = []
+        for t in my_wl_list:
+            if t and t not in seen:
+                seen.add(t)
+                ordered.append(t)
+        my_wl_list = ordered
 
         st.session_state["my_watchlist"] = my_wl_list.copy()
+        save_user_watchlist(my_wl_list)
         my_wl_display = ", ".join(my_wl_list) if my_wl_list else "—"
 
         col_w1, col_w2 = st.columns([3, 1])
@@ -1763,6 +1838,51 @@ with tab_full:
                 key="watchlist_hide_earnings_days",
                 help="0 = ne rien masquer",
             )
+
+        col_x, col_y = st.columns([1, 1])
+        with col_x:
+            st.download_button(
+                "⬇️ Exporter ma watchlist (CSV)",
+                data=pd.DataFrame({"ticker": my_wl_list}).to_csv(index=False).encode("utf-8"),
+                file_name="my_watchlist.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with col_y:
+            up = st.file_uploader(
+                "⬆️ Importer une watchlist (CSV)",
+                type=["csv"],
+                label_visibility="collapsed",
+            )
+            if up is not None:
+                try:
+                    df_up = pd.read_csv(up)
+                    col = df_up.columns[0] if len(df_up.columns) else None
+                    imported = (
+                        df_up[col]
+                        .astype(str)
+                        .str.upper()
+                        .str.strip()
+                        .tolist()
+                        if col
+                        else []
+                    )
+                    wl = sorted(
+                        set(st.session_state.get("my_watchlist", []) + imported)
+                    )
+                    st.session_state["my_watchlist"] = wl
+                    save_user_watchlist(wl)
+                    df_sync = normalize_cols(pd.DataFrame({"ticker": wl}))
+                    st.session_state[MY_WATCHLIST_KEY] = df_sync.copy()
+                    st.success(f"Watchlist importée ({len(imported)} entrées).")
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Import invalide: {e}")
+
+        wl_len = len(st.session_state.get("my_watchlist", []))
+        st.caption(
+            f"💾 Watchlist persistée dans `data/my_watchlist.csv` · {wl_len} tickers"
+        )
 
         wl = [
             str(t).upper().strip()
@@ -1861,6 +1981,11 @@ with tab_full:
                             .drop_duplicates(subset=["isin", "ticker"])
                         )
                         save_my_watchlist(my_wl_df)
+                        st.session_state["my_watchlist"] = [
+                            str(t).upper().strip()
+                            for t in my_wl_df["ticker"].astype(str).tolist()
+                            if str(t).strip()
+                        ]
                         st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
                         st.rerun()
                     else:
