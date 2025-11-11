@@ -2432,75 +2432,135 @@ if run_bt:
                         log_info["thread_errors"] = errors[:50]
                     _diag_panel("⚠️ Breakdown des erreurs", log_info)
 
-                # Résumé
-                st.subheader("📊 Résumé")
+                # =======================
+                # Résumé directionnel (BUY/HOLD/SELL)
+                # =======================
+                st.subheader("📊 Résumé (qualité des conseils)")
 
-                def _summary(df):
-                    if df is None or df.empty or "Perf_%" not in df.columns:
+                # Paramètre: bande neutre pour HOLD/WATCH
+                HOLD_BAND = st.slider(
+                    "Bande neutre HOLD (±%)",
+                    min_value=0.5,
+                    max_value=5.0,
+                    value=2.0,
+                    step=0.5,
+                )
+
+                # Normalisations
+                if "SignalRef" not in df_bt.columns:
+                    df_bt["SignalRef"] = "NA"
+                df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+                df_bt["Perf_%"] = pd.to_numeric(df_bt.get("Perf_%", np.nan), errors="coerce")
+
+                # Règle de succès directionnelle
+                def _is_good(signal, perf):
+                    if pd.isna(perf):
                         return None
-                    d = df.dropna(subset=["Perf_%"])
-                    if d.empty:
+                    s = str(signal).upper()
+                    if s == "BUY":
+                        return perf > 0
+                    if s in ("SELL", "REDUCE"):
+                        return perf < 0
+                    if s in ("HOLD", "WATCH"):
+                        return abs(perf) <= HOLD_BAND
+                    return None
+
+                df_bt["GoodAdvice"] = df_bt.apply(
+                    lambda r: _is_good(r["SignalRef"], r["Perf_%"]), axis=1
+                )
+
+                def _agg(df):
+                    dfv = df.dropna(subset=["Perf_%"])
+                    if dfv.empty:
                         return None
-                    out = {
-                        "n": int(len(d)),
-                        "perf_avg_%": round(float(d["Perf_%"].mean()), 2),
-                        "perf_med_%": round(float(d["Perf_%"].median()), 2),
-                        "hit_ratio_%": round(
-                            float((d["Perf_%"] > 0).mean() * 100.0), 1
-                        ),
+                    good = dfv["GoodAdvice"] == True
+                    return {
+                        "n": int(len(dfv)),
+                        "perf_avg_%": round(float(dfv["Perf_%"].mean()), 2),
+                        "perf_med_%": round(float(dfv["Perf_%"].median()), 2),
+                        "hit_ratio_dir_%": round(float(good.mean() * 100.0), 1)
+                        if len(dfv)
+                        else None,
+                        "score_avg": round(float(dfv["ScoreRef"].mean()), 2)
+                        if "ScoreRef" in dfv.columns
+                        else None,
                     }
-                    if "ScoreRef" in d.columns:
-                        out["score_avg"] = round(float(d["ScoreRef"].mean()), 2)
-                    return out
 
-                buy = (
-                    df_bt[df_bt["SignalRef"] == "BUY"]
-                    if "SignalRef" in df_bt.columns
-                    else df_bt.iloc[0:0]
-                )
-                hold = (
-                    df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
-                    if "SignalRef" in df_bt.columns
-                    else df_bt.iloc[0:0]
-                )
-                sell = (
-                    df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
-                    if "SignalRef" in df_bt.columns
-                    else df_bt.iloc[0:0]
-                )
+                buy = df_bt[df_bt["SignalRef"] == "BUY"]
+                hold = df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
+                sell = df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
 
                 agg = {
-                    "ALL": _summary(df_bt),
-                    "BUY": _summary(buy),
-                    "HOLD": _summary(hold),
-                    "SELL": _summary(sell),
+                    "ALL": _agg(df_bt),
+                    "BUY": _agg(buy),
+                    "HOLD": _agg(hold),
+                    "SELL": _agg(sell),
                 }
-                if agg.get("BUY") and agg.get("SELL"):
-                    agg["SPREAD_BUY_minus_SELL_%"] = round(
-                        agg["BUY"]["perf_avg_%"] - agg["SELL"]["perf_avg_%"], 2
-                    )
+
+                # Spread sémantique: perf moyenne des titres "bons" selon le sens vs "mauvais"
+                try:
+                    all_ok = df_bt[df_bt["GoodAdvice"] == True]["Perf_%"]
+                    all_bad = df_bt[df_bt["GoodAdvice"] == False]["Perf_%"]
+                    if len(all_ok) and len(all_bad):
+                        agg["SPREAD_GOOD_minus_BAD_%"] = round(
+                            float(all_ok.mean() - all_bad.mean()), 2
+                        )
+                except Exception:
+                    pass
 
                 st.json(agg)
 
-                # Tableau détaillé
-                st.subheader("📄 Détails par valeur")
+                # Alerte s’il n’y a pas de BUY
+                if agg.get("BUY") is None or agg["BUY"]["n"] in (None, 0):
+                    st.info(
+                        "ℹ️ Aucun BUY détecté à la date de référence. Tu peux assouplir les seuils de signal BUY (ex: BUY ≥ 65 → 60)."
+                    )
+
+                # =======================
+                # Tableau détaillé + colonne Quality
+                # =======================
+                st.subheader("📄 Détails par valeur (qualité du conseil)")
+
+                def _label_quality(signal, good):
+                    s = str(signal).upper()
+                    if good is True:
+                        return "✅ Bon" if s in ("BUY", "SELL", "REDUCE", "HOLD", "WATCH") else "—"
+                    if good is False:
+                        return "❌ Mauvais"
+                    return "—"
+
+                df_show = df_bt.dropna(subset=["Perf_%"], how="all").copy()
+                df_show["Quality"] = df_show.apply(
+                    lambda r: _label_quality(r["SignalRef"], r["GoodAdvice"]), axis=1
+                )
+
                 show_cols = [
-                    "Ticker",
-                    "Name",
-                    "Market",
-                    "DateRef",
-                    "DateH",
-                    "CloseRef",
-                    "CloseH",
-                    "Perf_%",
-                    "ScoreRef",
-                    "SignalRef",
+                    c
+                    for c in [
+                        "Ticker",
+                        "Name",
+                        "Market",
+                        "DateRef",
+                        "DateH",
+                        "CloseRef",
+                        "CloseH",
+                        "Perf_%",
+                        "ScoreRef",
+                        "SignalRef",
+                        "Quality",
+                        "error",
+                    ]
+                    if c in df_show.columns
                 ]
-                show_cols = [c for c in show_cols if c in df_bt.columns]
-                df_show = df_bt.dropna(subset=["Perf_%"], how="all")
+
+                df_sorted = df_show.sort_values(
+                    ["GoodAdvice", "Perf_%"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+
                 st.dataframe(
-                    df_show[show_cols]
-                    .sort_values("ScoreRef", ascending=False, na_position="last"),
+                    df_sorted[show_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
