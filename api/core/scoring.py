@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+import datetime as dt
 import os
 
 import numpy as np
@@ -11,6 +12,85 @@ import pandas as pd
 
 
 DEBUG = bool(os.getenv("DEBUG", "0") == "1")
+
+
+def pre_filter(df: pd.DataFrame, meta: dict | None = None) -> bool:
+    """Return ``False`` when the instrument should be skipped for scoring today."""
+
+    try:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return False
+
+        if "Close" not in df or df["Close"].dropna().empty:
+            return False
+
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        if close.empty:
+            return False
+
+        sma200 = close.rolling(200).mean()
+        sma200_last = float(sma200.iloc[-1]) if not sma200.dropna().empty else float("nan")
+        close_last = float(close.iloc[-1])
+        if not np.isnan(sma200_last) and close_last < sma200_last:
+            return False
+
+        if "Volume" in df:
+            volume = pd.to_numeric(df["Volume"], errors="coerce")
+            vol_med = float(volume.tail(60).median()) if not volume.dropna().empty else float("nan")
+            if not np.isnan(vol_med) and vol_med < 300_000:
+                return False
+
+        if {"High", "Low"}.issubset(df.columns):
+            high = pd.to_numeric(df["High"], errors="coerce")
+            low = pd.to_numeric(df["Low"], errors="coerce")
+            prev_close = close.shift(1)
+            tr_components = pd.concat(
+                [
+                    high - low,
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs(),
+                ],
+                axis=1,
+            )
+            tr = tr_components.max(axis=1)
+            atr = tr.rolling(20).mean()
+            atr_last = float(atr.iloc[-1]) if not atr.dropna().empty else float("nan")
+            if not np.isnan(atr_last) and atr_last > 0:
+                ratio = atr_last / close_last if close_last else float("inf")
+                if not np.isnan(ratio) and ratio > 0.05:
+                    return False
+
+        if isinstance(meta, dict) and meta.get("earnings_date") is not None:
+            try:
+                next_earnings = pd.to_datetime(meta.get("earnings_date"))
+            except Exception:
+                next_earnings = pd.NaT
+            if pd.notna(next_earnings):
+                days_to_event = abs((next_earnings - dt.datetime.utcnow()).days)
+                if days_to_event <= 7:
+                    return False
+    except Exception:
+        return True
+
+    return True
+
+
+def calibrate_thresholds(df_scores: pd.DataFrame) -> dict[str, float]:
+    """Calibrate BUY/SELL thresholds dynamically from the score distribution."""
+
+    try:
+        if df_scores is None or "Score" not in df_scores:
+            raise ValueError("missing Score column")
+
+        scores = pd.to_numeric(df_scores["Score"], errors="coerce").dropna()
+        if scores.empty:
+            raise ValueError("no usable scores")
+
+        q70 = float(np.nanpercentile(scores, 70))
+        q30 = float(np.nanpercentile(scores, 30))
+        return {"buy": q70, "sell": q30}
+    except Exception:
+        return {"buy": 1.0, "sell": -1.0}
 
 
 def _ema(series: pd.Series, span: int) -> pd.Series:
@@ -663,98 +743,110 @@ def compute_kpis_investor(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def compute_score_investor(df: pd.DataFrame):
-    """
-    Score LT ∈ [-5, +5] + action (facultatif pour compat UI):
-    - Trend (Close>SMA52w + pente SMA52w)
-    - Momentum 12-1
-    - %toHH52w
-    - Drawdown 26w (moindre drawdown = mieux)
-    - Volatilité 20w (plus faible = mieux)
-    """
+def compute_score_investor(df: pd.DataFrame, meta: dict | None = None) -> tuple[float, str]:
+    """Compute the long-term investor score with pre-filters and dynamic weighting."""
 
-    k = compute_kpis_investor(df)
-    if k.empty:
+    if not isinstance(df, pd.DataFrame) or df.empty or "Close" not in df.columns:
         return 0.0, "HOLD"
 
-    def last(col, default=np.nan):
-        if col in k.columns:
-            s = k[col].dropna()
-            if not s.empty:
-                return float(s.iloc[-1])
-        return default
+    if not pre_filter(df, meta):
+        return 0.0, "HOLD"
 
-    c = last("W_Close")
-    sma52 = last("SMA52w")
-    pctH = last("%toHH52w", -0.2)
-    mom = last("MOM_12m_minus_1m", 0.0)
-    rv = last("RV20w", np.nan)
-    dd = last("DD26w", -0.2)
-
-    above52 = int(not (np.isnan(c) or np.isnan(sma52)) and sma52 and c > sma52)
     try:
-        s52_tail = k["SMA52w"].dropna().tail(13)
-        slope52 = (s52_tail.iloc[-1] / s52_tail.iloc[0] - 1.0) if len(s52_tail) >= 2 else 0.0
-    except Exception:
+        kpi_weekly = compute_kpis_investor(df)
+
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        if close.empty:
+            return 0.0, "HOLD"
+
+        close_last = float(close.iloc[-1])
+
+        rsi_series = _rsi_ema(close).dropna()
+        rsi_last = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+        rsi_norm = float(np.clip(1 - 2 * abs(rsi_last - 50.0) / 50.0, -1.0, 1.0))
+
+        mom_val = np.nan
+        pct_hh_val = np.nan
+        sma52_val = np.nan
+        w_close_val = close_last
         slope52 = 0.0
 
-    trend_s = (0.4 if above52 else -0.2) + np.tanh(slope52 * 5.0) * 0.6
-    trend_s = np.clip(trend_s, -1.0, 1.0)
+        if isinstance(kpi_weekly, pd.DataFrame) and not kpi_weekly.empty:
+            def _last(series_name: str) -> float:
+                if series_name not in kpi_weekly.columns:
+                    return float("nan")
+                series = pd.to_numeric(kpi_weekly[series_name], errors="coerce").dropna()
+                if series.empty:
+                    return float("nan")
+                return float(series.iloc[-1])
 
-    mom_s = np.tanh(mom / 0.6)
+            mom_val = _last("MOM_12m_minus_1m")
+            pct_hh_val = _last("%toHH52w")
+            sma52_val = _last("SMA52w")
+            w_close_candidate = _last("W_Close")
+            if not np.isnan(w_close_candidate):
+                w_close_val = w_close_candidate
 
-    hh_s = -np.tanh((1 - (1 + pctH)) * 2.0)
+            try:
+                sma52_tail = pd.to_numeric(kpi_weekly["SMA52w"], errors="coerce").dropna().tail(13)
+                if len(sma52_tail) >= 2:
+                    slope52 = float(sma52_tail.iloc[-1] / sma52_tail.iloc[0] - 1.0)
+            except Exception:
+                slope52 = 0.0
 
-    dd_s = np.tanh((-dd) * 3.0)
+        mom_norm = float(np.tanh(mom_val / 0.6)) if not np.isnan(mom_val) else 0.0
 
-    vol_s = -np.tanh(max(rv - 0.30, 0.0) * 3.0) if not np.isnan(rv) else 0.0
+        above_sma = (
+            not np.isnan(w_close_val)
+            and not np.isnan(sma52_val)
+            and sma52_val != 0
+            and w_close_val > sma52_val
+        )
+        trend_component = 0.4 if above_sma else -0.2
+        sma_structure = float(np.clip(trend_component + np.tanh(slope52 * 5.0) * 0.6, -1.0, 1.0))
 
-    parts = {
-        "trend": trend_s,
-        "mom12_1": mom_s,
-        "hh52": hh_s,
-        "dd26": dd_s,
-        "vol20w": vol_s,
-    }
-    weights = {"trend": 0.35, "mom12_1": 0.25, "hh52": 0.15, "dd26": 0.15, "vol20w": 0.10}
+        pct_to_high_norm = (
+            float(-np.tanh((1 - (1 + pct_hh_val)) * 2.0))
+            if not np.isnan(pct_hh_val)
+            else 0.0
+        )
 
-    valid = {k_: v for k_, v in parts.items() if not np.isnan(v)}
-    if not valid:
-        score_norm = 0.0
-    else:
-        wsum = sum(weights[k_] for k_ in valid.keys())
-        score_norm = sum(parts[k_] * (weights[k_] / wsum) for k_ in valid.keys())
-
-    score = float(np.clip(score_norm * 5.0, -5.0, 5.0))
-
-    # Les seuils d'action sont adaptés automatiquement selon l'échelle du score.
-    # Le score de compute_score_investor est historiquement borné dans [-5, 5].
-    # Cependant, certains appels peuvent le rescinder dans une base 0-100.
-    # Nous ajustons donc dynamiquement les seuils pour éviter un excès de "HOLD".
-    if abs(score) <= 10.0:
-        # Score centré autour de 0 (≈ [-5, 5])
-        if score >= 2.0:
-            action = "BUY"
-        elif score >= 1.0:
-            action = "WATCH"
-        elif score <= -2.0:
-            action = "SELL"
-        elif score <= -1.0:
-            action = "REDUCE"
+        _, _, hist = _macd(close)
+        hist_series = hist.dropna()
+        if hist_series.empty:
+            macd_signal = 0.0
         else:
-            action = "HOLD"
-    else:
-        # Score déjà rescalé sur une base type 0-100
-        if score >= 60.0:
-            action = "BUY"
-        elif score >= 55.0:
-            action = "WATCH"
-        elif score <= 40.0:
-            action = "SELL"
-        elif score <= 45.0:
-            action = "REDUCE"
-        else:
-            action = "HOLD"
+            hist_std = float(hist_series.tail(100).std(ddof=0))
+            latest_hist = float(hist_series.iloc[-1])
+            if hist_std and not np.isnan(hist_std) and hist_std > 0:
+                macd_signal = float(np.tanh(latest_hist / hist_std))
+            else:
+                macd_signal = float(np.tanh(latest_hist))
 
-    return score, action
+        score_tech = (
+            0.3 * rsi_norm
+            + 0.3 * mom_norm
+            + 0.2 * sma_structure
+            + 0.1 * pct_to_high_norm
+            + 0.1 * macd_signal
+        )
+        if not np.isfinite(score_tech):
+            score_tech = 0.0
+
+        score_fund = 0.0
+        if isinstance(meta, dict):
+            for key in ("fscore_fund", "fscore", "fund_score"):
+                if key in meta and meta[key] is not None:
+                    try:
+                        score_fund = float(meta[key])
+                    except Exception:
+                        score_fund = 0.0
+                    break
+        if not np.isfinite(score_fund):
+            score_fund = 0.0
+
+        score_total = round(0.8 * float(score_tech) + 0.2 * float(score_fund), 2)
+        return score_total, "HOLD"
+    except Exception:
+        return 0.0, "HOLD"
 
