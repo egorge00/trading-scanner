@@ -1629,6 +1629,46 @@ with tab_single:
             st.subheader("📣 Earnings (contexte)")
             st.dataframe(df_earn, use_container_width=True, height=120)
 
+            with st.expander("ℹ️ Comprendre les indicateurs (résumé)", expanded=False):
+                st.markdown(
+                    """
+**Objectif** : lecture rapide des KPIs utilisés par le score (profil Investisseur).
+
+### 📘 Indicateurs principaux
+- **SMA26w** — moyenne mobile **26 semaines** (~6 mois).  
+  • Au-dessus du cours ⇒ biais haussier moyen terme ; en dessous ⇒ prudence.  
+- **SMA52w** — moyenne mobile **52 semaines** (1 an).  
+  • Repère long terme : au-dessus ⇒ tendance LT haussière.  
+- **% to 52w High** — distance au **plus haut 52 semaines**.  
+  • Proche de 0% = près des sommets (momentum fort).  
+- **Momentum 12-1** — performance **12 mois** en excluant le **dernier mois**.  
+  • Évite l’effet de retournement court terme; >0% = dynamique positive.  
+- **Volatilité 20w** — variabilité des **rendements hebdo**, **annualisée**.  
+  • ~15–30% normal ; >50% très volatil.  
+- **Drawdown 26w** — pire repli depuis le **plus haut 26 semaines**.  
+  • -2% faible respiration ; -20% correction ; <-30% gros creux.
+
+---
+
+### 🧮 Formules (simplifiées)
+- **SMA26w / SMA52w** : moyenne des clôtures sur 26 / 52 semaines.
+- **% to 52w High** : \\( (Close - High_{52w}) / High_{52w} \\times 100 \\).
+- **Momentum 12-1** : \\( (Close_{t-1m} - Close_{t-12m}) / Close_{t-12m} \\times 100 \\).
+- **Volatilité 20w** :  
+  1) rendements hebdo \\( r_t = \\ln(\\frac{P_t}{P_{t-1}}) \\)  
+  2) \\( \\sigma_{20w} = std(r_t) \\) sur 20 semaines  
+  3) **annualisation** : \\( \\sigma_{ann} = \\sigma_{20w} \\times \\sqrt{52} \\).
+- **Drawdown 26w** : \\( (\\min_{après\\;max} P - P_{max})/P_{max} \\times 100 \\).
+
+---
+
+### 🧠 Rappels utiles
+- **TTM** = *Trailing Twelve Months* (12 mois glissants).  
+- Les **ETF** n’ont pas d’earnings (colonne vide = normal).  
+- Les fondamentaux manquants ➜ affichés **“—”** (pas de faux 0).
+                    """
+                )
+
             audit_payload = {
                 "ticker": ticker_input,
                 "profile": profile,
