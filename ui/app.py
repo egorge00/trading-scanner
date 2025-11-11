@@ -2408,174 +2408,93 @@ if run_bt:
                 uni, int(months_back), int(horizon_days), max_workers=8
             )
 
-            if not df_bt.empty:
-                for col, default in [
-                    ("Perf_%", np.nan),
-                    ("ScoreRef", np.nan),
-                    ("SignalRef", "NA"),
-                    ("error", None),
-                ]:
-                    if col not in df_bt.columns:
-                        df_bt[col] = default
+            # ---------- Garanties de schéma (évite les KeyError) ----------
+            for col, default in [
+                ("Perf_%", np.nan),
+                ("ScoreRef", np.nan),
+                ("SignalRef", "NA"),
+                ("error", None),
+                ("DateRef", None),
+                ("DateH", None),
+                ("CloseRef", np.nan),
+                ("CloseH", np.nan),
+            ]:
+                if col not in df_bt.columns:
+                    df_bt[col] = default
 
-                df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
-                df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
-                df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+            df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
+            df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
+            df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
 
-                if "error" in df_bt.columns and df_bt["error"].notna().any():
-                    counts = df_bt["error"].value_counts(dropna=True).to_dict()
-                    examples = (
-                        df_bt[df_bt["error"].notna()].head(10).to_dict(orient="records")
-                    )
-                    log_info = {"counts": counts, "examples": examples}
-                    if errors:
-                        log_info["thread_errors"] = errors[:50]
-                    _diag_panel("⚠️ Breakdown des erreurs", log_info)
+            # ---------- Panneau d’options d’affichage ----------
+            st.subheader("📄 Détails par valeur (liste complète)")
+            copt1, copt2, copt3 = st.columns([1, 1, 2])
+            with copt1:
+                only_with_perf = st.checkbox("Uniquement lignes avec performance", value=True)
+            with copt2:
+                show_errors = st.checkbox("Afficher lignes en erreur", value=False)
+            with copt3:
+                sort_by = st.selectbox("Trier par", ["ScoreRef", "Perf_%", "Ticker"], index=0)
+                sort_desc = st.checkbox("Tri décroissant", value=True)
 
-                # =======================
-                # Résumé directionnel (BUY/HOLD/SELL)
-                # =======================
-                st.subheader("📊 Résumé (qualité des conseils)")
+            # ---------- Filtrage selon options ----------
+            df_show = df_bt.copy()
+            if only_with_perf:
+                df_show = df_show[df_show["Perf_%"].notna()].copy()
+            if not show_errors and "error" in df_show.columns:
+                df_show = df_show[df_show["error"].isna()].copy()
 
-                # Paramètre: bande neutre pour HOLD/WATCH
-                HOLD_BAND = st.slider(
-                    "Bande neutre HOLD (±%)",
-                    min_value=0.5,
-                    max_value=5.0,
-                    value=2.0,
-                    step=0.5,
-                )
-
-                # Normalisations
-                if "SignalRef" not in df_bt.columns:
-                    df_bt["SignalRef"] = "NA"
-                df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
-                df_bt["Perf_%"] = pd.to_numeric(df_bt.get("Perf_%", np.nan), errors="coerce")
-
-                # Règle de succès directionnelle
-                def _is_good(signal, perf):
-                    if pd.isna(perf):
-                        return None
-                    s = str(signal).upper()
-                    if s == "BUY":
-                        return perf > 0
-                    if s in ("SELL", "REDUCE"):
-                        return perf < 0
-                    if s in ("HOLD", "WATCH"):
-                        return abs(perf) <= HOLD_BAND
-                    return None
-
-                df_bt["GoodAdvice"] = df_bt.apply(
-                    lambda r: _is_good(r["SignalRef"], r["Perf_%"]), axis=1
-                )
-
-                def _agg(df):
-                    dfv = df.dropna(subset=["Perf_%"])
-                    if dfv.empty:
-                        return None
-                    good = dfv["GoodAdvice"] == True
-                    return {
-                        "n": int(len(dfv)),
-                        "perf_avg_%": round(float(dfv["Perf_%"].mean()), 2),
-                        "perf_med_%": round(float(dfv["Perf_%"].median()), 2),
-                        "hit_ratio_dir_%": round(float(good.mean() * 100.0), 1)
-                        if len(dfv)
-                        else None,
-                        "score_avg": round(float(dfv["ScoreRef"].mean()), 2)
-                        if "ScoreRef" in dfv.columns
-                        else None,
-                    }
-
-                buy = df_bt[df_bt["SignalRef"] == "BUY"]
-                hold = df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
-                sell = df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
-
-                agg = {
-                    "ALL": _agg(df_bt),
-                    "BUY": _agg(buy),
-                    "HOLD": _agg(hold),
-                    "SELL": _agg(sell),
-                }
-
-                # Spread sémantique: perf moyenne des titres "bons" selon le sens vs "mauvais"
-                try:
-                    all_ok = df_bt[df_bt["GoodAdvice"] == True]["Perf_%"]
-                    all_bad = df_bt[df_bt["GoodAdvice"] == False]["Perf_%"]
-                    if len(all_ok) and len(all_bad):
-                        agg["SPREAD_GOOD_minus_BAD_%"] = round(
-                            float(all_ok.mean() - all_bad.mean()), 2
-                        )
-                except Exception:
-                    pass
-
-                st.json(agg)
-
-                # Alerte s’il n’y a pas de BUY
-                if agg.get("BUY") is None or agg["BUY"]["n"] in (None, 0):
-                    st.info(
-                        "ℹ️ Aucun BUY détecté à la date de référence. Tu peux assouplir les seuils de signal BUY (ex: BUY ≥ 65 → 60)."
-                    )
-
-                # =======================
-                # Tableau détaillé + colonne Quality
-                # =======================
-                st.subheader("📄 Détails par valeur (qualité du conseil)")
-
-                def _label_quality(signal, good):
-                    s = str(signal).upper()
-                    if good is True:
-                        return "✅ Bon" if s in ("BUY", "SELL", "REDUCE", "HOLD", "WATCH") else "—"
-                    if good is False:
-                        return "❌ Mauvais"
-                    return "—"
-
-                df_show = df_bt.dropna(subset=["Perf_%"], how="all").copy()
-                df_show["Quality"] = df_show.apply(
-                    lambda r: _label_quality(r["SignalRef"], r["GoodAdvice"]), axis=1
-                )
-
-                show_cols = [
-                    c
-                    for c in [
-                        "Ticker",
-                        "Name",
-                        "Market",
-                        "DateRef",
-                        "DateH",
-                        "CloseRef",
-                        "CloseH",
-                        "Perf_%",
-                        "ScoreRef",
-                        "SignalRef",
-                        "Quality",
-                        "error",
-                    ]
-                    if c in df_show.columns
+            # ---------- Colonnes et tri ----------
+            cols_order = [
+                c
+                for c in [
+                    "Ticker",
+                    "Name",
+                    "Market",
+                    "DateRef",
+                    "DateH",
+                    "CloseRef",
+                    "CloseH",
+                    "Perf_%",
+                    "ScoreRef",
+                    "SignalRef",
+                    "error",
                 ]
+                if c in df_show.columns
+            ]
 
-                df_sorted = df_show.sort_values(
-                    ["GoodAdvice", "Perf_%"],
-                    ascending=[False, False],
-                    na_position="last",
+            if sort_by in df_show.columns:
+                df_show = df_show.sort_values(
+                    sort_by, ascending=not sort_desc, na_position="last"
                 )
 
-                st.dataframe(
-                    df_sorted[show_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            # ---------- Rendu tableau ----------
+            if df_show.empty:
+                st.info("Aucune ligne à afficher avec ces options. Modifie les filtres ci-dessus.")
+            else:
+                st.dataframe(df_show[cols_order], use_container_width=True, hide_index=True)
 
-                # Export CSV
+                # Export CSV (liste telle qu’affichée)
                 csv_buf = io.StringIO()
-                df_bt.to_csv(csv_buf, index=False)
+                df_show[cols_order].to_csv(csv_buf, index=False)
                 st.download_button(
-                    "⬇️ Télécharger les résultats (CSV)",
+                    "⬇️ Exporter la liste affichée (CSV)",
                     data=csv_buf.getvalue().encode("utf-8"),
-                    file_name=f"backtest_m{months_back}_h{horizon_days}.csv",
+                    file_name=f"backtest_list_m{months_back}_h{horizon_days}.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
-            else:
-                st.warning("Aucun résultat exploitable (données manquantes ou erreurs).")
+
+            # ---------- Logs d’erreur (facultatif, sous expander) ----------
+            if errors or ("error" in df_bt.columns and df_bt["error"].notna().any()):
+                with st.expander("⚠️ Logs / Lignes en erreur", expanded=False):
+                    if errors:
+                        st.write(errors[:50])
+                    if "error" in df_bt.columns:
+                        st.dataframe(
+                            df_bt[df_bt["error"].notna()][cols_order],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
     except Exception as e:
         st.error(f"Backtest impossible : {e}")
