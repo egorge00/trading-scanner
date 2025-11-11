@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import typing as t
@@ -69,6 +70,10 @@ W_FTSE100 = "https://en.wikipedia.org/wiki/FTSE_100_Index"
 W_DAX = "https://en.wikipedia.org/wiki/DAX"
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; WatchlistBot/1.0; +https://example.com)"}
+
+
+def _clean_name(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip()
 
 def fetch_tables(url: str, retries: int = 3, sleep_s: float = 1.5) -> list[pd.DataFrame]:
     """Télécharge une page et renvoie toutes les tables HTML en DataFrames.
@@ -232,6 +237,51 @@ def build_dax40() -> pd.DataFrame:
     print(f"[INFO] DAX40 rows: {len(out)}")
     return out
 
+
+def fetch_nikkei225() -> pd.DataFrame:
+    """Récupère les constituants du Nikkei 225 et normalise les colonnes."""
+
+    url = "https://en.wikipedia.org/wiki/Nikkei_225"
+    try:
+        tables = pd.read_html(url, flavor="bs4")
+    except Exception as exc:
+        print(f"[WARN] Nikkei225 read_html failed: {exc}")
+        tables = []
+
+    candidate = None
+    for table in tables:
+        cols = {str(col).lower(): col for col in table.columns}
+        has_code = any(key in cols for key in ["code", "ticker"])
+        has_name = any(key in cols for key in ["company", "company name", "name"])
+        if has_code and has_name:
+            candidate = table.rename(
+                columns={
+                    cols.get("code", cols.get("ticker")): "Code",
+                    cols.get("company", cols.get("company name", cols.get("name"))): "Company",
+                }
+            )
+            break
+
+    if candidate is None or candidate.empty:
+        print("[WARN] Nikkei225 table not found")
+        return pd.DataFrame(columns=["isin", "ticker", "name", "market"])
+
+    candidate["ticker"] = (
+        candidate["Code"].astype(str).str.replace(".T", "", regex=False).str.strip() + ".T"
+    )
+    candidate["name"] = candidate["Company"].astype(str).map(_clean_name)
+    candidate["market"] = "JP"
+    candidate["isin"] = ""
+
+    out = (
+        candidate[["isin", "ticker", "name", "market"]]
+        .drop_duplicates(subset=["ticker"])
+        .reset_index(drop=True)
+    )
+    print(f"[INFO] Nikkei225 rows: {len(out)}")
+    return out
+
+
 def main():
     os.makedirs("data", exist_ok=True)
 
@@ -242,6 +292,7 @@ def main():
         (build_eurostoxx50, "EUROSTOXX50"),
         (build_ftse100, "FTSE100"),
         (build_dax40, "DAX40"),
+        (fetch_nikkei225, "NIKKEI225"),
     ]:
         try:
             df = builder()

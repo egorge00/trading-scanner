@@ -23,6 +23,8 @@ import yfinance as yf
 
 USER_WL_PATH = Path("data/my_watchlist.csv")
 
+AVAILABLE_MARKETS = ["US", "FR", "UK", "DE", "JP", "ETF"]
+
 
 def load_user_watchlist() -> list[str]:
     """Charge la watchlist utilisateur depuis data/my_watchlist.csv (si présent)."""
@@ -1718,7 +1720,7 @@ with tab_full:
     uni["market_norm"] = uni["market"].apply(_norm_market)
 
     # --- Marchés disponibles (force ETF dans l'UI) ---
-    MARKETS_MAIN = ["US", "FR", "DE", "UK", "ETF"]
+    MARKETS_MAIN = [m for m in AVAILABLE_MARKETS if m != "ETF"] + ["ETF"]
     present = set(uni["market_norm"].dropna().unique().tolist())
     markets_all = sorted(set([m for m in MARKETS_MAIN if m in present] + ["ETF"]))
 
