@@ -726,16 +726,35 @@ def compute_score_investor(df: pd.DataFrame):
         score_norm = sum(parts[k_] * (weights[k_] / wsum) for k_ in valid.keys())
 
     score = float(np.clip(score_norm * 5.0, -5.0, 5.0))
-    if score >= 3.0:
-        action = "BUY"
-    elif score >= 1.5:
-        action = "WATCH"
-    elif score <= -3.0:
-        action = "SELL"
-    elif score <= -1.5:
-        action = "REDUCE"
+
+    # Les seuils d'action sont adaptés automatiquement selon l'échelle du score.
+    # Le score de compute_score_investor est historiquement borné dans [-5, 5].
+    # Cependant, certains appels peuvent le rescinder dans une base 0-100.
+    # Nous ajustons donc dynamiquement les seuils pour éviter un excès de "HOLD".
+    if abs(score) <= 10.0:
+        # Score centré autour de 0 (≈ [-5, 5])
+        if score >= 2.0:
+            action = "BUY"
+        elif score >= 1.0:
+            action = "WATCH"
+        elif score <= -2.0:
+            action = "SELL"
+        elif score <= -1.0:
+            action = "REDUCE"
+        else:
+            action = "HOLD"
     else:
-        action = "HOLD"
+        # Score déjà rescalé sur une base type 0-100
+        if score >= 60.0:
+            action = "BUY"
+        elif score >= 55.0:
+            action = "WATCH"
+        elif score <= 40.0:
+            action = "SELL"
+        elif score <= 45.0:
+            action = "REDUCE"
+        else:
+            action = "HOLD"
 
     return score, action
 
