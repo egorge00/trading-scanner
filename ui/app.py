@@ -1935,32 +1935,56 @@ with tab_full:
                 "Aucune donnée affichée : lance un scan ou ajuste les filtres de marché."
             )
 
-        wl_list = st.session_state.get("my_watchlist", [])
-        if wl_list:
-            st.caption(f"💾 Watchlist persistée ({len(wl_list)} tickers)")
+        # ---------- Watchlist: affichage compact + corbeille sans collisions de keys ----------
+        from hashlib import blake2b
 
+        def _unique_key(prefix: str, tkr: str, idx: int = 0) -> str:
+            # génère une clé courte unique déterministe à partir du ticker et d'un index
+            h = blake2b(f"{prefix}|{tkr}|{idx}".encode("utf-8"), digest_size=6).hexdigest()
+            return f"{prefix}_{h}"
+
+        # Normalise & dédoublonne la watchlist une bonne fois
+        wl_raw = st.session_state.get("my_watchlist", [])
+        wl_norm = [str(x).upper().strip() for x in wl_raw if str(x).strip()]
+        wl_uniq = sorted(set(wl_norm))
+        if wl_uniq != wl_raw:
+            st.session_state["my_watchlist"] = wl_uniq
+            # persistance si tu l’as
+            try:
+                from pathlib import Path
+
+                USER_WL_PATH = Path("data/my_watchlist.csv")
+                pd.DataFrame({"ticker": wl_uniq}).to_csv(USER_WL_PATH, index=False)
+            except Exception:
+                pass
+
+        if wl_uniq:
+            st.caption(f"💾 Watchlist persistée ({len(wl_uniq)} tickers)")
+
+            # grilles de 6 colonnes
             def _chunk(seq, n):
                 for i in range(0, len(seq), n):
                     yield seq[i : i + n]
 
-            for row in _chunk(wl_list, 6):
-                cols_row = st.columns(len(row))
+            section_prefix = "rmwl_grid"  # <- namespace unique à CETTE section
+            for row in _chunk(wl_uniq, 6):
+                cols = st.columns(len(row))
                 for i, tkr in enumerate(row):
-                    with cols_row[i]:
+                    with cols[i]:
                         st.markdown(
                             "<div style='padding:6px 8px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;'>"
                             f"<b>{tkr}</b></div>",
                             unsafe_allow_html=True,
                         )
-                        if st.button(
-                            "🗑️ Retirer",
-                            key=f"rmwl_{tkr}",
-                            use_container_width=True,
-                        ):
-                            new_wl = [x for x in wl_list if x != tkr]
+                        btn_key = _unique_key(section_prefix, tkr, i)
+                        if st.button("🗑️ Retirer", key=btn_key, use_container_width=True):
+                            new_wl = [x for x in wl_uniq if x != tkr]
                             st.session_state["my_watchlist"] = new_wl
-                            save_user_watchlist(new_wl)
-                            safe_rerun()
+                            try:
+                                pd.DataFrame({"ticker": new_wl}).to_csv(USER_WL_PATH, index=False)
+                            except Exception:
+                                pass
+                            st.rerun()
         else:
             st.caption("Watchlist vide.")
 
