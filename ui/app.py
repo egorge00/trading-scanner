@@ -169,56 +169,48 @@ def _compute_daily_kpis_for_audit(df: pd.DataFrame) -> dict:
 
     return out
 
-PRECOMP_DIR = Path("data")
-PRECOMP_MAP = {
-    "Investisseur": ("data/daily_scan_investisseur.parquet", "data/daily_scan_investisseur.json"),
-    "Swing": ("data/daily_scan_swing.parquet", "data/daily_scan_swing.json"),
+# ============================
+# 📦 Chargement pré-calculé par profil (Investisseur / Swing)
+# ============================
+PRECOMP_FILES = {
+    "Investisseur": (
+        "data/daily_scan_investisseur.parquet",
+        "data/daily_scan_investisseur.json",
+    ),
+    "Swing": (
+        "data/daily_scan_swing.parquet",
+        "data/daily_scan_swing.json",
+    ),
 }
 
 
-def _list_data_dir() -> list[str]:
-    try:
-        return sorted([p.name for p in PRECOMP_DIR.iterdir() if p.is_file()])
-    except Exception:
-        return []
+def load_precomputed_for_profile(profile: str):
+    """Charge le parquet/json du profil demandé. Ne télécharge rien."""
 
+    pq_path, js_path = PRECOMP_FILES.get(profile, (None, None))
+    if not pq_path:
+        return pd.DataFrame(), None, {"error": f"profile inconnu: {profile}"}
 
-def load_precomputed_for_profile(profile: str) -> tuple[pd.DataFrame, str, str]:
-    """Retourne (df, timestamp, diag)."""
+    pq, js = Path(pq_path), Path(js_path)
+    if not pq.exists():
+        return pd.DataFrame(), None, {"missing": str(pq)}
 
-    pq, js = PRECOMP_MAP.get(profile, (None, None))
-    diag: list[str] = []
+    df = pd.read_parquet(pq)
 
-    if pq is None:
-        return pd.DataFrame(), "—", "profile not in PRECOMP_MAP"
+    # Arrondis légers pour l’UI
+    for c in df.columns:
+        if pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = pd.to_numeric(df[c], errors="coerce").round(2)
 
-    diag.append(f"looking for: {pq}")
-    if not os.path.exists(pq):
-        diag.append("parquet file missing")
-        return pd.DataFrame(), "—", " / ".join(diag)
-
-    try:
-        df = pd.read_parquet(pq)
-        diag.append(f"parquet loaded, rows={len(df)} cols={list(df.columns)}")
-    except Exception as e:
-        return pd.DataFrame(), "—", f"parquet read failed: {e}"
-
-    ts = "—"
-    if js and os.path.exists(js):
+    ts = None
+    if js.exists():
         try:
-            with open(js, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            ts = meta.get("generated_at_utc", "—")
-            diag.append(f"meta ok: {ts}")
-        except Exception as e:
-            diag.append(f"meta read failed: {e}")
+            meta = json.loads(js.read_text(encoding="utf-8"))
+            ts = meta.get("generated_at_utc")
+        except Exception:
+            ts = None
 
-    need = {"Ticker", "Name", "Market", "Signal", "ScoreFinal"}
-    missing = need - set(df.columns)
-    if missing:
-        diag.append(f"missing required columns: {sorted(list(missing))}")
-
-    return df, ts, " / ".join(diag)
+    return df, ts, {"ok": True, "file": str(pq)}
 
 
 def cache_full_scan_in_session(profile: str, df: pd.DataFrame, ts: str):
@@ -1721,17 +1713,20 @@ with tab_full:
 
     st.session_state.setdefault("daily_full_scan", {})
 
-    diag_details = ""
-    if cache_key not in st.session_state["daily_full_scan"]:
-        df_pre, ts, diag_details = load_precomputed_for_profile(profile)
-        if not df_pre.empty:
-            cache_full_scan_in_session(profile, df_pre, ts)
+    cache_entry = st.session_state["daily_full_scan"].get(cache_key, {})
+    df_full_for_today = cache_entry.get("df", pd.DataFrame())
+    ts_scan = cache_entry.get("ts")
+    missing_precomp = False
+
+    if df_full_for_today.empty:
+        df_full_for_today, ts_scan, _ = load_precomputed_for_profile(profile)
+        if not df_full_for_today.empty:
+            cache_full_scan_in_session(profile, df_full_for_today, ts_scan or "—")
+            cache_entry = st.session_state["daily_full_scan"].get(cache_key, {})
         else:
-            st.warning("⚠️ Pas de fichier pré-calculé trouvé pour ce profil aujourd’hui.")
-            with st.expander("Diagnostics (pré-calcul)"):
-                st.write("Profil:", profile)
-                st.write("Data dir files:", _list_data_dir())
-                st.code(diag_details or "—")
+            missing_precomp = True
+
+    status_placeholder = st.empty()
 
     # --- Univers normalisé ---
     uni = get_universe_normalized().copy()
@@ -1789,10 +1784,26 @@ with tab_full:
         out_manual = run_full_scan_all_and_cache_ui(profile)
         if isinstance(out_manual, pd.DataFrame) and not out_manual.empty:
             cache_full_scan_in_session(profile, out_manual, _now_paris_str())
+            missing_precomp = False
 
     meta = st.session_state.get("daily_full_scan", {}).get(cache_key, {})
     df = meta.get("df", pd.DataFrame())
     ts = meta.get("ts", "—")
+
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        status_placeholder.caption(
+            f"📦 Profil **{profile}** · Fichier chargé : `daily_scan_{profile.lower()}.parquet` · Dernier scan : {ts or 'n/a'} (UTC)"
+        )
+    else:
+        if missing_precomp:
+            status_placeholder.warning(
+                f"⚠️ Pas de fichier pré-calculé trouvé pour le profil **{profile}** aujourd’hui.\n"
+                "→ Lance le workflow GitHub correspondant ou utilise ton bouton 🔄 Rafraîchir manuel."
+            )
+        else:
+            status_placeholder.warning(
+                "⚠️ Aucun scan en cache pour aujourd’hui. Utilise 🔄 Rafraîchir pour lancer un calcul manuel."
+            )
 
     # ---- Init 'my_watchlist' depuis fichier si absent en session ----
     if "my_watchlist" not in st.session_state:
