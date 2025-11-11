@@ -1724,28 +1724,14 @@ with tab_full:
 
     # --- État de sélection persistant (multiselect) ---
     # --- Synchronise les sélections de marché avec les options disponibles ---
-    existing_selected = st.session_state.get("markets_selected")
-    if existing_selected is None:
-        st.session_state["markets_selected"] = markets_all[:]
-    else:
-        filtered_selected = [m for m in existing_selected if m in markets_all]
-        if not filtered_selected and existing_selected:
-            # Les marchés choisis ne sont plus disponibles -> revenir au défaut
-            filtered_selected = markets_all[:]
-        if filtered_selected != existing_selected:
-            st.session_state["markets_selected"] = filtered_selected[:]
-
-    stored_multiselect = st.session_state.get("markets_multiselect")
-    base_selection = (
-        stored_multiselect
-        if stored_multiselect is not None
-        else st.session_state["markets_selected"]
-    )
-    filtered_multiselect = [m for m in base_selection if m in markets_all]
-    if not filtered_multiselect and base_selection:
-        filtered_multiselect = markets_all[:]
-    if stored_multiselect != filtered_multiselect:
-        st.session_state["markets_multiselect"] = filtered_multiselect[:]
+    st.session_state.setdefault("markets_selected", markets_all[:])
+    existing_selected = st.session_state.get("markets_selected", [])
+    filtered_selected = [m for m in existing_selected if m in markets_all]
+    if not filtered_selected and existing_selected:
+        # Les marchés choisis ne sont plus disponibles -> revenir au défaut
+        filtered_selected = markets_all[:]
+    if filtered_selected != existing_selected:
+        st.session_state["markets_selected"] = filtered_selected[:]
 
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
@@ -1753,26 +1739,24 @@ with tab_full:
         st.subheader("🌍 Marchés & Filtres")
 
         col_markets, col_all, col_none = st.columns([2, 1, 1])
-        selected_markets = st.session_state.get("markets_multiselect", markets_all[:])
         with col_markets:
-            selected_markets = st.multiselect(
+            st.multiselect(
                 "Marchés à inclure",
                 options=markets_all,
-                default=selected_markets,
+                default=st.session_state["markets_selected"],
                 help="Sélectionne un ou plusieurs marchés à scanner.",
-                key="markets_multiselect",
+                key="markets_selected",
             )
         with col_all:
             if st.button("Tout sélectionner", use_container_width=True):
-                selected_markets = markets_all[:]
-                st.session_state["markets_multiselect"] = selected_markets[:]
+                st.session_state["markets_selected"] = markets_all[:]
         with col_none:
             if st.button("Tout désélectionner", use_container_width=True):
-                selected_markets = []
-                st.session_state["markets_multiselect"] = []
+                st.session_state["markets_selected"] = []
 
-        st.session_state["markets_multiselect"] = selected_markets[:]
-        st.session_state["markets_selected"] = selected_markets[:]
+        selected_markets = [
+            str(x).upper() for x in st.session_state.get("markets_selected", [])
+        ]
 
         col_limit, col_hide, col_refresh = st.columns([2, 1, 1])
         with col_limit:
