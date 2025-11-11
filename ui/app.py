@@ -2498,6 +2498,19 @@ if run_bt:
                     sort_by, ascending=not sort_desc, na_position="last"
                 )
 
+            # ---------- Indicateur global de qualité ----------
+            if "GoodAdvice" in df_bt.columns and df_bt["GoodAdvice"].notna().any():
+                total = int(df_bt["GoodAdvice"].notna().sum())
+                bons = int((df_bt["GoodAdvice"] == True).sum())
+                pct_bon = round(bons / total * 100, 1) if total > 0 else 0.0
+                st.markdown(
+                    f"### ✅ {pct_bon}% de **bons conseils** ({bons}/{total})"
+                )
+            else:
+                st.info(
+                    "Aucune donnée de performance disponible pour évaluer la qualité des conseils."
+                )
+
             # ---------- Rendu tableau ----------
             if df_show.empty:
                 st.info("Aucune ligne à afficher avec ces options. Modifie les filtres ci-dessus.")
