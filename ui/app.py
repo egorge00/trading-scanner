@@ -293,7 +293,8 @@ def render_results_table(
 
     view = _round_numeric_cols(view, 2)
 
-    st.subheader(title)
+    if title:
+        st.subheader(title)
 
     cols = main_table_columns(profile, view.columns.tolist())
 
@@ -1837,8 +1838,40 @@ with tab_full:
             allow_delete=False,
         )
 
+        try:
+            st.session_state["__current_scan_df__"] = view_scan.copy()
+        except Exception:
+            st.session_state["__current_scan_df__"] = pd.DataFrame()
+
         st.markdown("---")
-        st.subheader("⭐ Ma Watchlist")
+        st.subheader("⭐ Ma Watchlist (extrait du résultat du scan)")
+
+        wl = [str(t).upper().strip() for t in st.session_state.get("my_watchlist", [])]
+        base_df = st.session_state.get("__current_scan_df__", pd.DataFrame())
+
+        if not len(wl):
+            st.info("Watchlist vide. Ajoute des valeurs depuis le tableau ci-dessus.")
+        elif base_df is None or base_df.empty:
+            st.warning("Le scan du jour n'est pas chargé. Lance/Recharge le scan pour voir ta watchlist.")
+        else:
+            wl_df = base_df[base_df["Ticker"].astype(str).str.upper().isin(wl)].copy()
+
+            if wl_df.empty:
+                st.info("Aucune des valeurs de ta watchlist n'apparaît dans le tableau actuel (vérifie les filtres).")
+            else:
+                try:
+                    render_results_table(
+                        df=wl_df,
+                        profile=profile,
+                        title="",
+                        hide_before_n=hide_before_n,
+                        allow_delete=True,
+                    )
+                except Exception:
+                    st.dataframe(wl_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("🛠️ Gérer ma watchlist")
 
         if not view_scan.empty:
             opts = (
