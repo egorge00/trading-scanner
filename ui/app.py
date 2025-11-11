@@ -2168,31 +2168,55 @@ def _load_universe(markets=None, limit=None) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _download_history_cached(tkr: str, months_back: int) -> pd.DataFrame:
-    """Télécharge de l'historique quotidien pour un ticker (cache 1h)."""
+def _prefetch_history_batch(
+    tickers: list[str], months_back: int
+) -> dict[str, pd.DataFrame]:
+    """Télécharge l'historique pour un lot de tickers en UNE requête yfinance, puis split par ticker."""
+
+    if not tickers:
+        return {}
 
     months = max(months_back + 6, 18)
-    df = yf.download(
-        tkr,
-        period=f"{months}mo",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        group_by="column",
-        threads=True,
-    )
-    if df is None or df.empty:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.droplevel(0, axis=1)
+    try:
+        raw = yf.download(
+            " ".join(tickers),
+            period=f"{months}mo",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
+
+    out: dict[str, pd.DataFrame] = {}
     need = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
-    if any(c not in df.columns for c in need):
-        return pd.DataFrame()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    for c in need:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["Close"]).copy()
-    return df
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        tickers_found = sorted(set(raw.columns.get_level_values(0)))
+        for tkr in tickers_found:
+            sub = raw[tkr].copy()
+            if not all(c in sub.columns for c in need):
+                continue
+            sub.index = pd.to_datetime(sub.index).tz_localize(None)
+            for c in need:
+                sub[c] = pd.to_numeric(sub[c], errors="coerce")
+            sub = sub.dropna(subset=["Close"])
+            if sub.empty:
+                continue
+            out[tkr.upper()] = sub
+    else:
+        sub = raw.copy()
+        if all(c in sub.columns for c in need):
+            sub.index = pd.to_datetime(sub.index).tz_localize(None)
+            for c in need:
+                sub[c] = pd.to_numeric(sub[c], errors="coerce")
+            sub = sub.dropna(subset=["Close"])
+            if not sub.empty:
+                out[tickers[0].upper()] = sub
+
+    return out
 
 
 # --- helpers diagnostics ---
@@ -2258,10 +2282,20 @@ def _run_backtest(
     progress = st.progress(0.0, text="Téléchargement & calcul…")
     N = len(df_uni)
 
+    tickers_list = df_uni["ticker"].astype(str).str.upper().tolist()
+
+    def _chunk(seq, n):
+        for i in range(0, len(seq), n):
+            yield seq[i : i + n]
+
+    hist_cache: dict[str, pd.DataFrame] = {}
+    for batch in _chunk(tickers_list, 50):
+        hist_cache.update(_prefetch_history_batch(batch, int(months_back)))
+
     def worker(tkr, name, mkt):
         row = {
             "Ticker": tkr,
-            "Name": name,
+            "Name": str(name),
             "Market": mkt,
             "DateRef": None,
             "DateH": None,
@@ -2273,8 +2307,8 @@ def _run_backtest(
             "error": None,
         }
 
-        df = _download_history_cached(tkr, months_back)
-        if df.empty:
+        df = hist_cache.get(str(tkr).upper())
+        if df is None or df.empty:
             row["error"] = "no_data"
             return row
 
@@ -2319,8 +2353,8 @@ def _run_backtest(
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {
-            ex.submit(worker, r.ticker, r.name, r.market): i
-            for i, r in df_uni.iterrows()
+            ex.submit(worker, r["ticker"], r["name"], r["market"]): r["ticker"]
+            for _, r in df_uni.iterrows()
         }
         for k, fut in enumerate(as_completed(futs), 1):
             try:
