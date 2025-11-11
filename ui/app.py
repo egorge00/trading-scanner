@@ -2227,6 +2227,23 @@ def _score_at(df: pd.DataFrame, date_ref: pd.Timestamp):
     )
 
 
+def _normalize_signal(sig: str | None) -> str:
+    """Mappe tout signal en {BUY, HOLD, WATCH, SELL, REDUCE} (ou 'NA')."""
+
+    if not sig:
+        return "NA"
+    s = str(sig).strip().upper()
+    if s in {"BUY", "LONG"}:
+        return "BUY"
+    if s in {"HOLD", "WATCH", "NEUTRAL"}:
+        return "HOLD" if s == "HOLD" else "WATCH"
+    if s in {"SELL", "SHORT"}:
+        return "SELL"
+    if s in {"REDUCE", "TRIM"}:
+        return "REDUCE"
+    return s
+
+
 def _run_backtest(
     df_uni: pd.DataFrame, months_back: int, horizon_days: int, max_workers: int = 8
 ):
@@ -2239,23 +2256,24 @@ def _run_backtest(
     def worker(tkr, name, mkt):
         df = _download_history_cached(tkr, months_back)
         if df.empty:
-            return {"ticker": tkr, "name": name, "market": mkt, "error": "no_data"}
+            return {"Ticker": tkr, "Name": name, "Market": mkt, "error": "no_data"}
         dref, dh = _pick_dates(df, months_back, horizon_days)
         if dref is None or dh is None:
             return {
-                "ticker": tkr,
-                "name": name,
-                "market": mkt,
+                "Ticker": tkr,
+                "Name": name,
+                "Market": mkt,
                 "error": "not_enough_history",
             }
         score_ref, signal_ref = _score_at(df, dref)
         if score_ref is None:
             return {
-                "ticker": tkr,
-                "name": name,
-                "market": mkt,
+                "Ticker": tkr,
+                "Name": name,
+                "Market": mkt,
                 "error": "score_failed",
             }
+        signal_ref = _normalize_signal(signal_ref)
         p_then = float(df.loc[dref, "Close"])
         p_h = float(df.loc[dh, "Close"])
         perf = (p_h / p_then - 1.0) * 100.0
@@ -2330,6 +2348,13 @@ if run_bt:
                 # Résumé
                 st.subheader("📊 Résumé")
 
+                if "SignalRef" not in df_bt.columns:
+                    df_bt["SignalRef"] = "NA"
+                else:
+                    df_bt["SignalRef"] = (
+                        df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+                    )
+
                 def _summary(df):
                     if df.empty:
                         return None
@@ -2338,7 +2363,9 @@ if run_bt:
                         "perf_avg_%": round(float(df["Perf_%"].mean()), 2),
                         "perf_med_%": round(float(df["Perf_%"].median()), 2),
                         "hit_ratio_%": round(float((df["Perf_%"] > 0).mean() * 100.0), 1),
-                        "score_avg": round(float(df["ScoreRef"].mean()), 2),
+                        "score_avg": round(float(df["ScoreRef"].mean()), 2)
+                        if "ScoreRef" in df.columns
+                        else None,
                     }
 
                 buy = df_bt[df_bt["SignalRef"] == "BUY"]
@@ -2346,12 +2373,12 @@ if run_bt:
                 sell = df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
 
                 agg = {
-                    "ALL": _summary(df_bt),
-                    "BUY": _summary(buy),
-                    "HOLD": _summary(hold),
-                    "SELL": _summary(sell),
+                    "ALL": _summary(df_bt.dropna(subset=["Perf_%"])),
+                    "BUY": _summary(buy.dropna(subset=["Perf_%"])),
+                    "HOLD": _summary(hold.dropna(subset=["Perf_%"])),
+                    "SELL": _summary(sell.dropna(subset=["Perf_%"])),
                 }
-                if agg["BUY"] and agg["SELL"]:
+                if agg.get("BUY") and agg.get("SELL"):
                     agg["SPREAD_BUY_minus_SELL_%"] = round(
                         agg["BUY"]["perf_avg_%"] - agg["SELL"]["perf_avg_%"], 2
                     )
@@ -2391,8 +2418,16 @@ if run_bt:
             else:
                 st.warning("Aucun résultat exploitable (données manquantes ou erreurs).")
 
-            if errors:
+            if errors or (
+                "error" in df_bt.columns and df_bt["error"].notna().any()
+            ):
                 with st.expander("⚠️ Logs d'erreurs", expanded=False):
-                    st.write(errors[:50])
+                    if errors:
+                        st.write(errors[:50])
+                    st.write(
+                        df_bt[df_bt.get("error").notna()]
+                        if "error" in df_bt.columns
+                        else "—"
+                    )
     except Exception as e:
         st.error(f"Backtest impossible : {e}")
