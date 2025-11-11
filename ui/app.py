@@ -21,6 +21,19 @@ import traceback
 import yfinance as yf
 
 
+# --- Rerun robuste ---
+def safe_rerun():
+    import streamlit as st
+
+    # pose un flag si le contexte ne permet pas le rerun immédiat
+    st.session_state["_needs_rerun"] = True
+    try:
+        st.rerun()
+    except Exception:
+        # certains contextes (threads/callbacks) peuvent empêcher le rerun immédiat
+        pass
+
+
 USER_WL_PATH = Path("data/my_watchlist.csv")
 
 AVAILABLE_MARKETS = ["US", "FR", "UK", "DE", "JP", "ETF"]
@@ -363,7 +376,7 @@ def render_results_table(
                         ]
                         st.session_state["my_watchlist"] = wl
                         save_user_watchlist(wl)
-                        st.experimental_rerun()
+                        safe_rerun()
 
 
 def _daily_cache_key(profile: str) -> str:
@@ -718,6 +731,10 @@ def map_score_column(columns: list[str]) -> list[str]:
 if not IMPORT_ONLY:
     # ---------- CONFIG ----------
     st.set_page_config(page_title="Trading Scanner", layout="wide")
+
+    if st.session_state.get("_needs_rerun"):
+        st.session_state["_needs_rerun"] = False
+        st.rerun()
 
     # ---------- AUTH (simple & robuste) ----------
     USERNAME = "egorge"
@@ -1910,7 +1927,7 @@ with tab_full:
                         st.session_state["my_watchlist"] = sorted(set(wl))
                         save_user_watchlist(st.session_state["my_watchlist"])
                         st.success(f"{tkr_to_add} ajouté à la watchlist.")
-                        st.experimental_rerun()
+                        safe_rerun()
                     else:
                         st.info(f"{tkr_to_add} est déjà dans la watchlist.")
         else:
@@ -1943,7 +1960,7 @@ with tab_full:
                             new_wl = [x for x in wl_list if x != tkr]
                             st.session_state["my_watchlist"] = new_wl
                             save_user_watchlist(new_wl)
-                            st.experimental_rerun()
+                            safe_rerun()
         else:
             st.caption("Watchlist vide.")
 
