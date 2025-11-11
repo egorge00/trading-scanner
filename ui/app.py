@@ -1723,12 +1723,29 @@ with tab_full:
     markets_all = sorted(set([m for m in MARKETS_MAIN if m in present] + ["ETF"]))
 
     # --- État de sélection persistant (multiselect) ---
-    if "markets_selected" not in st.session_state:
+    # --- Synchronise les sélections de marché avec les options disponibles ---
+    existing_selected = st.session_state.get("markets_selected")
+    if existing_selected is None:
         st.session_state["markets_selected"] = markets_all[:]
-    if "markets_multiselect" not in st.session_state:
-        st.session_state["markets_multiselect"] = st.session_state[
-            "markets_selected"
-        ][:]
+    else:
+        filtered_selected = [m for m in existing_selected if m in markets_all]
+        if not filtered_selected and existing_selected:
+            # Les marchés choisis ne sont plus disponibles -> revenir au défaut
+            filtered_selected = markets_all[:]
+        if filtered_selected != existing_selected:
+            st.session_state["markets_selected"] = filtered_selected[:]
+
+    stored_multiselect = st.session_state.get("markets_multiselect")
+    base_selection = (
+        stored_multiselect
+        if stored_multiselect is not None
+        else st.session_state["markets_selected"]
+    )
+    filtered_multiselect = [m for m in base_selection if m in markets_all]
+    if not filtered_multiselect and base_selection:
+        filtered_multiselect = markets_all[:]
+    if stored_multiselect != filtered_multiselect:
+        st.session_state["markets_multiselect"] = filtered_multiselect[:]
 
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
