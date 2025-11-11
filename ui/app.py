@@ -2422,9 +2422,38 @@ if run_bt:
                 if col not in df_bt.columns:
                     df_bt[col] = default
 
-            df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
-            df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
+            # ---------- Quality: bon/mauvais conseil (avec emoji) ----------
+            # Règle: BUY -> bon si Perf_% > 0 ; SELL/REDUCE -> bon si Perf_% < 0 ; HOLD/WATCH -> bon si |Perf_%| <= 2%
+            HOLD_BAND = 2.0  # % neutre pour HOLD/WATCH
+
+            def _is_good(signal, perf):
+                if pd.isna(perf):
+                    return None
+                s = str(signal).upper()
+                if s == "BUY":
+                    return perf > 0
+                if s in ("SELL", "REDUCE"):
+                    return perf < 0
+                if s in ("HOLD", "WATCH"):
+                    return abs(perf) <= HOLD_BAND
+                return None
+
+            def _label_quality(signal, good):
+                if good is True:
+                    return "✅ Bon"
+                if good is False:
+                    return "❌ Mauvais"
+                return "—"
+
+            # Normalise et calcule Quality
             df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+            df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
+            df_bt["GoodAdvice"] = df_bt.apply(lambda r: _is_good(r["SignalRef"], r["Perf_%"]), axis=1)
+            df_bt["Quality"] = df_bt.apply(
+                lambda r: _label_quality(r["SignalRef"], r["GoodAdvice"]), axis=1
+            )
+
+            df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
 
             # ---------- Panneau d’options d’affichage ----------
             st.subheader("📄 Détails par valeur (liste complète)")
@@ -2458,6 +2487,7 @@ if run_bt:
                     "Perf_%",
                     "ScoreRef",
                     "SignalRef",
+                    "Quality",
                     "error",
                 ]
                 if c in df_show.columns
