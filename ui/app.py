@@ -2254,41 +2254,55 @@ def _run_backtest(
     N = len(df_uni)
 
     def worker(tkr, name, mkt):
-        df = _download_history_cached(tkr, months_back)
-        if df.empty:
-            return {"Ticker": tkr, "Name": name, "Market": mkt, "error": "no_data"}
-        dref, dh = _pick_dates(df, months_back, horizon_days)
-        if dref is None or dh is None:
-            return {
-                "Ticker": tkr,
-                "Name": name,
-                "Market": mkt,
-                "error": "not_enough_history",
-            }
-        score_ref, signal_ref = _score_at(df, dref)
-        if score_ref is None:
-            return {
-                "Ticker": tkr,
-                "Name": name,
-                "Market": mkt,
-                "error": "score_failed",
-            }
-        signal_ref = _normalize_signal(signal_ref)
-        p_then = float(df.loc[dref, "Close"])
-        p_h = float(df.loc[dh, "Close"])
-        perf = (p_h / p_then - 1.0) * 100.0
-        return {
+        row = {
             "Ticker": tkr,
             "Name": name,
             "Market": mkt,
-            "DateRef": dref.date().isoformat(),
-            "DateH": dh.date().isoformat(),
-            "CloseRef": round(p_then, 4),
-            "CloseH": round(p_h, 4),
-            "Perf_%": round(perf, 2),
-            "ScoreRef": round(score_ref, 2),
-            "SignalRef": signal_ref,
+            "DateRef": None,
+            "DateH": None,
+            "CloseRef": None,
+            "CloseH": None,
+            "Perf_%": None,
+            "ScoreRef": None,
+            "SignalRef": "NA",
+            "error": None,
         }
+
+        df = _download_history_cached(tkr, months_back)
+        if df.empty:
+            row["error"] = "no_data"
+            return row
+
+        dref, dh = _pick_dates(df, months_back, horizon_days)
+        if dref is None or dh is None:
+            row["error"] = "not_enough_history"
+            return row
+
+        score_ref, signal_ref = _score_at(df, dref)
+        if score_ref is None:
+            row["error"] = "score_failed"
+            return row
+
+        try:
+            p_then = float(df.loc[dref, "Close"])
+            p_h = float(df.loc[dh, "Close"])
+            perf = (p_h / p_then - 1.0) * 100.0
+        except Exception as e:
+            row["error"] = f"perf_failed:{e}"
+            return row
+
+        row.update(
+            {
+                "DateRef": dref.date().isoformat(),
+                "DateH": dh.date().isoformat(),
+                "CloseRef": round(p_then, 4),
+                "CloseH": round(p_h, 4),
+                "Perf_%": round(perf, 2),
+                "ScoreRef": round(score_ref, 2),
+                "SignalRef": _normalize_signal(signal_ref),
+            }
+        )
+        return row
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {
@@ -2345,38 +2359,62 @@ if run_bt:
             )
 
             if not df_bt.empty:
+                for col, default in [
+                    ("Perf_%", np.nan),
+                    ("ScoreRef", np.nan),
+                    ("SignalRef", "NA"),
+                ]:
+                    if col not in df_bt.columns:
+                        df_bt[col] = default
+
+                df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
+                df_bt["ScoreRef"] = pd.to_numeric(df_bt.get("ScoreRef"), errors="coerce")
+                df_bt["SignalRef"] = (
+                    df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+                )
+
                 # Résumé
                 st.subheader("📊 Résumé")
 
-                if "SignalRef" not in df_bt.columns:
-                    df_bt["SignalRef"] = "NA"
-                else:
-                    df_bt["SignalRef"] = (
-                        df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
-                    )
-
                 def _summary(df):
-                    if df.empty:
+                    if df is None or df.empty or "Perf_%" not in df.columns:
                         return None
-                    return {
-                        "n": int(len(df)),
-                        "perf_avg_%": round(float(df["Perf_%"].mean()), 2),
-                        "perf_med_%": round(float(df["Perf_%"].median()), 2),
-                        "hit_ratio_%": round(float((df["Perf_%"] > 0).mean() * 100.0), 1),
-                        "score_avg": round(float(df["ScoreRef"].mean()), 2)
-                        if "ScoreRef" in df.columns
-                        else None,
+                    d = df.dropna(subset=["Perf_%"])
+                    if d.empty:
+                        return None
+                    out = {
+                        "n": int(len(d)),
+                        "perf_avg_%": round(float(d["Perf_%"].mean()), 2),
+                        "perf_med_%": round(float(d["Perf_%"].median()), 2),
+                        "hit_ratio_%": round(
+                            float((d["Perf_%"] > 0).mean() * 100.0), 1
+                        ),
                     }
+                    if "ScoreRef" in d.columns:
+                        out["score_avg"] = round(float(d["ScoreRef"].mean()), 2)
+                    return out
 
-                buy = df_bt[df_bt["SignalRef"] == "BUY"]
-                hold = df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
-                sell = df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
+                buy = (
+                    df_bt[df_bt["SignalRef"] == "BUY"]
+                    if "SignalRef" in df_bt.columns
+                    else df_bt.iloc[0:0]
+                )
+                hold = (
+                    df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
+                    if "SignalRef" in df_bt.columns
+                    else df_bt.iloc[0:0]
+                )
+                sell = (
+                    df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
+                    if "SignalRef" in df_bt.columns
+                    else df_bt.iloc[0:0]
+                )
 
                 agg = {
-                    "ALL": _summary(df_bt.dropna(subset=["Perf_%"])),
-                    "BUY": _summary(buy.dropna(subset=["Perf_%"])),
-                    "HOLD": _summary(hold.dropna(subset=["Perf_%"])),
-                    "SELL": _summary(sell.dropna(subset=["Perf_%"])),
+                    "ALL": _summary(df_bt),
+                    "BUY": _summary(buy),
+                    "HOLD": _summary(hold),
+                    "SELL": _summary(sell),
                 }
                 if agg.get("BUY") and agg.get("SELL"):
                     agg["SPREAD_BUY_minus_SELL_%"] = round(
@@ -2399,8 +2437,11 @@ if run_bt:
                     "ScoreRef",
                     "SignalRef",
                 ]
+                show_cols = [c for c in show_cols if c in df_bt.columns]
+                df_show = df_bt.dropna(subset=["Perf_%"], how="all")
                 st.dataframe(
-                    df_bt[show_cols].sort_values("ScoreRef", ascending=False),
+                    df_show[show_cols]
+                    .sort_values("ScoreRef", ascending=False, na_position="last"),
                     use_container_width=True,
                     hide_index=True,
                 )
