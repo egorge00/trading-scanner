@@ -10,7 +10,7 @@ import hashlib
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import bcrypt
 import numpy as np
@@ -2141,3 +2141,258 @@ with tab_pos:
                     file_name="positions.csv",
                     mime="text/csv"
                 )
+
+
+# ===========================
+# 📈 Onglet Backtest (basique)
+# ===========================
+
+
+def _load_universe(markets=None, limit=None) -> pd.DataFrame:
+    """Lit data/watchlist.csv (format: ,ticker,name,market) → DataFrame normalisé."""
+
+    df = pd.read_csv(
+        "data/watchlist.csv", header=None, names=["_isin", "ticker", "name", "market"]
+    )
+    df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
+    df["name"] = df["name"].astype(str).str.strip()
+    df["market"] = df["market"].astype(str).str.upper().str.strip()
+    df = df.dropna(subset=["ticker"]).drop_duplicates(subset=["ticker"]).reset_index(
+        drop=True
+    )
+    if markets:
+        df = df[df["market"].isin(markets)].copy()
+    if limit:
+        df = df.head(int(limit)).copy()
+    return df[["ticker", "name", "market"]]
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _download_history_cached(tkr: str, months_back: int) -> pd.DataFrame:
+    """Télécharge de l'historique quotidien pour un ticker (cache 1h)."""
+
+    months = max(months_back + 6, 18)
+    df = yf.download(
+        tkr,
+        period=f"{months}mo",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        group_by="column",
+        threads=True,
+    )
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.droplevel(0, axis=1)
+    need = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+    if any(c not in df.columns for c in need):
+        return pd.DataFrame()
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    for c in need:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["Close"]).copy()
+    return df
+
+
+def _pick_dates(df: pd.DataFrame, months_back: int, horizon_days: int):
+    """Choisit date_ref (il y a X mois) et date_h (X mois + horizon) selon jours de marché."""
+
+    if df.empty:
+        return None, None
+    last_date = df.index.max()
+    approx_ref = last_date - pd.DateOffset(months=months_back)
+    past = df.index[df.index <= approx_ref]
+    if len(past) == 0:
+        return None, None
+    date_ref = past.max()
+    horizon_target = date_ref + timedelta(days=horizon_days)
+    fut = df.index[df.index >= horizon_target]
+    if len(fut) == 0:
+        return None, None
+    date_h = fut.min()
+    return date_ref, date_h
+
+
+def _score_at(df: pd.DataFrame, date_ref: pd.Timestamp):
+    """Calcule le score Investisseur sans look-ahead (historique tronqué à date_ref)."""
+
+    hist = df[df.index <= date_ref].copy()
+    if len(hist) < 60:
+        return None, None
+    score, action = compute_score_investor(hist)
+    return (
+        float(score) if score is not None else None,
+        str(action) if action is not None else None,
+    )
+
+
+def _run_backtest(
+    df_uni: pd.DataFrame, months_back: int, horizon_days: int, max_workers: int = 8
+):
+    """Boucle multi-threads avec barre de progression."""
+
+    rows, errs = [], []
+    progress = st.progress(0.0, text="Téléchargement & calcul…")
+    N = len(df_uni)
+
+    def worker(tkr, name, mkt):
+        df = _download_history_cached(tkr, months_back)
+        if df.empty:
+            return {"ticker": tkr, "name": name, "market": mkt, "error": "no_data"}
+        dref, dh = _pick_dates(df, months_back, horizon_days)
+        if dref is None or dh is None:
+            return {
+                "ticker": tkr,
+                "name": name,
+                "market": mkt,
+                "error": "not_enough_history",
+            }
+        score_ref, signal_ref = _score_at(df, dref)
+        if score_ref is None:
+            return {
+                "ticker": tkr,
+                "name": name,
+                "market": mkt,
+                "error": "score_failed",
+            }
+        p_then = float(df.loc[dref, "Close"])
+        p_h = float(df.loc[dh, "Close"])
+        perf = (p_h / p_then - 1.0) * 100.0
+        return {
+            "Ticker": tkr,
+            "Name": name,
+            "Market": mkt,
+            "DateRef": dref.date().isoformat(),
+            "DateH": dh.date().isoformat(),
+            "CloseRef": round(p_then, 4),
+            "CloseH": round(p_h, 4),
+            "Perf_%": round(perf, 2),
+            "ScoreRef": round(score_ref, 2),
+            "SignalRef": signal_ref,
+        }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {
+            ex.submit(worker, r.ticker, r.name, r.market): i
+            for i, r in df_uni.iterrows()
+        }
+        for k, fut in enumerate(as_completed(futs), 1):
+            try:
+                res = fut.result()
+                rows.append(res)
+            except Exception as e:
+                errs.append(str(e))
+            progress.progress(k / N, text=f"Calcul {k}/{N}")
+
+    progress.empty()
+    df_res = pd.DataFrame(rows)
+    return df_res, errs
+
+
+# ============ UI Backtest ============
+st.markdown("---")
+st.header("📈 Backtest (basique)")
+
+# Choix simples
+AVAILABLE_MARKETS_BT = ["US", "FR", "UK", "DE", "JP", "ETF"]
+c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+with c1:
+    months_back = st.number_input(
+        "Mois en arrière (date de ref.)", min_value=3, max_value=36, value=12, step=1
+    )
+with c2:
+    horizon_days = st.number_input(
+        "Horizon (jours ouvrés)", min_value=10, max_value=180, value=60, step=5
+    )
+with c3:
+    markets = st.multiselect(
+        "Marchés", options=AVAILABLE_MARKETS_BT, default=["US", "FR"]
+    )
+with c4:
+    limit = st.number_input(
+        "Limite tickers", min_value=10, max_value=1000, value=100, step=10
+    )
+
+run_bt = st.button("🚀 Lancer le backtest", type="primary", use_container_width=True)
+
+if run_bt:
+    try:
+        uni = _load_universe(markets=markets, limit=int(limit))
+        if uni.empty:
+            st.warning("Univers vide selon ces filtres.")
+        else:
+            df_bt, errors = _run_backtest(
+                uni, int(months_back), int(horizon_days), max_workers=8
+            )
+
+            if not df_bt.empty:
+                # Résumé
+                st.subheader("📊 Résumé")
+
+                def _summary(df):
+                    if df.empty:
+                        return None
+                    return {
+                        "n": int(len(df)),
+                        "perf_avg_%": round(float(df["Perf_%"].mean()), 2),
+                        "perf_med_%": round(float(df["Perf_%"].median()), 2),
+                        "hit_ratio_%": round(float((df["Perf_%"] > 0).mean() * 100.0), 1),
+                        "score_avg": round(float(df["ScoreRef"].mean()), 2),
+                    }
+
+                buy = df_bt[df_bt["SignalRef"] == "BUY"]
+                hold = df_bt[df_bt["SignalRef"].isin(["HOLD", "WATCH"])]
+                sell = df_bt[df_bt["SignalRef"].isin(["SELL", "REDUCE"])]
+
+                agg = {
+                    "ALL": _summary(df_bt),
+                    "BUY": _summary(buy),
+                    "HOLD": _summary(hold),
+                    "SELL": _summary(sell),
+                }
+                if agg["BUY"] and agg["SELL"]:
+                    agg["SPREAD_BUY_minus_SELL_%"] = round(
+                        agg["BUY"]["perf_avg_%"] - agg["SELL"]["perf_avg_%"], 2
+                    )
+
+                st.json(agg)
+
+                # Tableau détaillé
+                st.subheader("📄 Détails par valeur")
+                show_cols = [
+                    "Ticker",
+                    "Name",
+                    "Market",
+                    "DateRef",
+                    "DateH",
+                    "CloseRef",
+                    "CloseH",
+                    "Perf_%",
+                    "ScoreRef",
+                    "SignalRef",
+                ]
+                st.dataframe(
+                    df_bt[show_cols].sort_values("ScoreRef", ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Export CSV
+                csv_buf = io.StringIO()
+                df_bt.to_csv(csv_buf, index=False)
+                st.download_button(
+                    "⬇️ Télécharger les résultats (CSV)",
+                    data=csv_buf.getvalue().encode("utf-8"),
+                    file_name=f"backtest_m{months_back}_h{horizon_days}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.warning("Aucun résultat exploitable (données manquantes ou erreurs).")
+
+            if errors:
+                with st.expander("⚠️ Logs d'erreurs", expanded=False):
+                    st.write(errors[:50])
+    except Exception as e:
+        st.error(f"Backtest impossible : {e}")
