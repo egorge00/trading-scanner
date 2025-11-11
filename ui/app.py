@@ -10,7 +10,7 @@ import hashlib
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import bcrypt
 import numpy as np
@@ -2195,36 +2195,41 @@ def _download_history_cached(tkr: str, months_back: int) -> pd.DataFrame:
     return df
 
 
-def _pick_dates(df: pd.DataFrame, months_back: int, horizon_days: int):
-    """Choisit date_ref (il y a X mois) et date_h (X mois + horizon) selon jours de marché."""
+# --- helpers diagnostics ---
+def _diag_panel(title: str, content):
+    with st.expander(title, expanded=False):
+        st.write(content)
+
+
+def _check_universe(df_uni: pd.DataFrame):
+    info = {
+        "rows": len(df_uni),
+        "markets":
+            sorted(df_uni["market"].unique().tolist())
+            if "market" in df_uni.columns and len(df_uni)
+            else [],
+        "head": df_uni.head(10).to_dict(orient="records") if len(df_uni) else [],
+    }
+    _diag_panel("🔎 Diagnostics univers", info)
+
+
+# --- remplace _pick_dates par une version basée sur POSITIONS (jours de bourse) ---
+def _pick_dates_by_pos(df: pd.DataFrame, months_back: int, horizon_days: int):
+    """
+    Choisit date_ref ~ 'il y a X mois' en prenant la date de marché la plus proche 'par le bas',
+    puis prend la date à +horizon_days *en positions* (jours de bourse), sans exiger de date calendaire exacte.
+    """
 
     if df.empty:
         return None, None
-    last_date = df.index.max()
-    approx_ref = last_date - pd.DateOffset(months=months_back)
-    past = df.index[df.index <= approx_ref]
-    if len(past) == 0:
-        return None, None
-    date_ref = past.max()
-    horizon_target = date_ref + timedelta(days=horizon_days)
-    fut = df.index[df.index >= horizon_target]
-    if len(fut) == 0:
-        return None, None
-    date_h = fut.min()
-    return date_ref, date_h
 
-
-def _score_at(df: pd.DataFrame, date_ref: pd.Timestamp):
-    """Calcule le score Investisseur sans look-ahead (historique tronqué à date_ref)."""
-
-    hist = df[df.index <= date_ref].copy()
-    if len(hist) < 60:
+    idx = df.index.sort_values()
+    approx_ref = idx.max() - pd.DateOffset(months=months_back)
+    pos_ref = idx.searchsorted(approx_ref, side="right") - 1
+    if pos_ref < 0:
         return None, None
-    score, action = compute_score_investor(hist)
-    return (
-        float(score) if score is not None else None,
-        str(action) if action is not None else None,
-    )
+    pos_h = min(pos_ref + int(horizon_days), len(idx) - 1)
+    return idx[pos_ref], idx[pos_h]
 
 
 def _normalize_signal(sig: str | None) -> str:
@@ -2273,14 +2278,20 @@ def _run_backtest(
             row["error"] = "no_data"
             return row
 
-        dref, dh = _pick_dates(df, months_back, horizon_days)
+        dref, dh = _pick_dates_by_pos(df, months_back, horizon_days)
         if dref is None or dh is None:
+            row["error"] = "date_pick_failed"
+            return row
+
+        hist = df[df.index <= dref].copy()
+        if len(hist) < 60:
             row["error"] = "not_enough_history"
             return row
 
-        score_ref, signal_ref = _score_at(df, dref)
-        if score_ref is None:
-            row["error"] = "score_failed"
+        try:
+            score_ref, signal_ref = compute_score_investor(hist)
+        except Exception as e:
+            row["error"] = f"score_failed:{e}"
             return row
 
         try:
@@ -2298,7 +2309,9 @@ def _run_backtest(
                 "CloseRef": round(p_then, 4),
                 "CloseH": round(p_h, 4),
                 "Perf_%": round(perf, 2),
-                "ScoreRef": round(score_ref, 2),
+                "ScoreRef": round(float(score_ref), 2)
+                if score_ref is not None
+                else None,
                 "SignalRef": _normalize_signal(signal_ref),
             }
         )
@@ -2351,8 +2364,11 @@ run_bt = st.button("🚀 Lancer le backtest", type="primary", use_container_widt
 if run_bt:
     try:
         uni = _load_universe(markets=markets, limit=int(limit))
+        _check_universe(uni)
         if uni.empty:
-            st.warning("Univers vide selon ces filtres.")
+            st.warning(
+                "Univers vide selon ces filtres (markets/limit). Essaie d’augmenter 'Limite' ou d’inclure plus de marchés."
+            )
         else:
             df_bt, errors = _run_backtest(
                 uni, int(months_back), int(horizon_days), max_workers=8
@@ -2363,15 +2379,24 @@ if run_bt:
                     ("Perf_%", np.nan),
                     ("ScoreRef", np.nan),
                     ("SignalRef", "NA"),
+                    ("error", None),
                 ]:
                     if col not in df_bt.columns:
                         df_bt[col] = default
 
                 df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
-                df_bt["ScoreRef"] = pd.to_numeric(df_bt.get("ScoreRef"), errors="coerce")
-                df_bt["SignalRef"] = (
-                    df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
-                )
+                df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
+                df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+
+                if "error" in df_bt.columns and df_bt["error"].notna().any():
+                    counts = df_bt["error"].value_counts(dropna=True).to_dict()
+                    examples = (
+                        df_bt[df_bt["error"].notna()].head(10).to_dict(orient="records")
+                    )
+                    log_info = {"counts": counts, "examples": examples}
+                    if errors:
+                        log_info["thread_errors"] = errors[:50]
+                    _diag_panel("⚠️ Breakdown des erreurs", log_info)
 
                 # Résumé
                 st.subheader("📊 Résumé")
@@ -2458,17 +2483,5 @@ if run_bt:
                 )
             else:
                 st.warning("Aucun résultat exploitable (données manquantes ou erreurs).")
-
-            if errors or (
-                "error" in df_bt.columns and df_bt["error"].notna().any()
-            ):
-                with st.expander("⚠️ Logs d'erreurs", expanded=False):
-                    if errors:
-                        st.write(errors[:50])
-                    st.write(
-                        df_bt[df_bt.get("error").notna()]
-                        if "error" in df_bt.columns
-                        else "—"
-                    )
     except Exception as e:
         st.error(f"Backtest impossible : {e}")
