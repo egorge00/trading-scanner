@@ -1725,30 +1725,51 @@ with tab_full:
     # --- État de sélection persistant (multiselect) ---
     if "markets_selected" not in st.session_state:
         st.session_state["markets_selected"] = markets_all[:]
+    if "markets_multiselect" not in st.session_state:
+        st.session_state["markets_multiselect"] = st.session_state[
+            "markets_selected"
+        ][:]
 
     hide_before_n = 0
     # --- Bloc 1 : Panneau de contrôle ---
     with card("🔧 Panneau de contrôle"):
-        c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-        with c1:
+        st.subheader("🌍 Marchés & Filtres")
+
+        col_markets, col_all, col_none = st.columns([2, 1, 1])
+        selected_markets = st.session_state.get("markets_multiselect", markets_all[:])
+        with col_markets:
             selected_markets = st.multiselect(
-                "Marchés",
+                "Marchés à inclure",
                 options=markets_all,
-                default=st.session_state["markets_selected"],
+                default=selected_markets,
+                help="Sélectionne un ou plusieurs marchés à scanner.",
+                key="markets_multiselect",
             )
-            st.session_state["markets_selected"] = selected_markets or markets_all[:]
-        with c2:
+        with col_all:
+            if st.button("Tout sélectionner", use_container_width=True):
+                selected_markets = markets_all[:]
+                st.session_state["markets_multiselect"] = selected_markets[:]
+        with col_none:
+            if st.button("Tout désélectionner", use_container_width=True):
+                selected_markets = []
+                st.session_state["markets_multiselect"] = []
+
+        st.session_state["markets_multiselect"] = selected_markets[:]
+        st.session_state["markets_selected"] = selected_markets[:]
+
+        col_limit, col_hide, col_refresh = st.columns([2, 1, 1])
+        with col_limit:
             limit_view = st.slider(
                 "Limite d’affichage", min_value=50, max_value=1500, value=1000, step=50
             )
-        with c3:
+        with col_hide:
             hide_before_n = st.selectbox(
                 "Masquer si earnings < N jours",
                 [0, 1, 2, 3, 5, 7, 14],
                 index=0,
                 help="0 = ne rien masquer",
             )
-        with c4:
+        with col_refresh:
             refresh = st.button("🔄 Rafraîchir (scan manuel)", use_container_width=True)
         st.caption(
             "Astuce : le scan complet est mis en cache pour la journée. Utilise 🔄 Rafraîchir pour lancer un nouveau calcul."
@@ -1779,8 +1800,10 @@ with tab_full:
 
     if isinstance(df, pd.DataFrame) and not df.empty:
         view = df.copy()
-        if selected_markets and selected_markets != markets_all:
+        if selected_markets:
             view = view[view["Market"].isin([m.upper() for m in selected_markets])]
+        else:
+            view = view.iloc[0:0]
 
         if "EarningsD" in view.columns and hide_before_n and hide_before_n > 0:
             view = view[(view["EarningsD"].isna()) | (view["EarningsD"] >= hide_before_n)]
@@ -1823,239 +1846,81 @@ with tab_full:
         )
 
         st.markdown("---")
-        st.markdown("### ⭐ Ma Watchlist (extrait du scan du jour)")
+        st.subheader("⭐ Ma Watchlist")
 
-        my_wl_df = load_my_watchlist()
-        my_wl_list: list[str] = []
-        if not my_wl_df.empty and "ticker" in my_wl_df.columns:
-            my_wl_list = [
-                str(t).upper().strip()
-                for t in my_wl_df["ticker"].astype(str).tolist()
-                if str(t).strip()
-            ]
+        if not view_scan.empty:
+            opts = (
+                view_scan.assign(
+                    __label__=view_scan["Ticker"].astype(str).str.upper().str.strip()
+                    + " — "
+                    + view_scan["Name"].astype(str).str.strip()
+                    + " ["
+                    + view_scan["Market"].astype(str).str.upper().str.strip()
+                    + "]",
+                    __value__=view_scan["Ticker"].astype(str).str.upper().str.strip(),
+                )[["__label__", "__value__"]]
+                .drop_duplicates("__value__")
+                .sort_values("__label__")
+                .to_dict(orient="records")
+            )
+            labels = [o["__label__"] for o in opts]
+            values = {o["__label__"]: o["__value__"] for o in opts}
 
-        my_wl_state = [
-            str(t).upper().strip()
-            for t in st.session_state.get("my_watchlist", [])
-            if str(t).strip()
-        ]
-        if my_wl_state and set(my_wl_state) != set(my_wl_list):
-            my_wl_list = my_wl_state[:]
-            if not my_wl_df.empty and "ticker" in my_wl_df.columns:
-                sync_df = my_wl_df[
-                    my_wl_df["ticker"].astype(str).str.upper().isin(my_wl_list)
-                ].copy()
-                order = {t: i for i, t in enumerate(my_wl_list)}
-                sync_df["__ord__"] = (
-                    sync_df["ticker"].astype(str).str.upper().map(order)
+            col_pick, col_add = st.columns([3, 1])
+            with col_pick:
+                choice_label = st.selectbox(
+                    "Rechercher une valeur à ajouter",
+                    options=["— Sélectionner —"] + labels,
+                    index=0,
                 )
-                sync_df = sync_df.sort_values("__ord__").drop(columns="__ord__")
-            else:
-                sync_df = normalize_cols(pd.DataFrame({"ticker": my_wl_list}))
-            st.session_state[MY_WATCHLIST_KEY] = sync_df.copy()
-            my_wl_df = sync_df
+            with col_add:
+                add_clicked = st.button("➕ Ajouter", use_container_width=True)
 
-        seen = set()
-        ordered: list[str] = []
-        for t in my_wl_list:
-            if t and t not in seen:
-                seen.add(t)
-                ordered.append(t)
-        my_wl_list = ordered
-
-        st.session_state["my_watchlist"] = my_wl_list.copy()
-        save_user_watchlist(my_wl_list)
-        my_wl_display = ", ".join(my_wl_list) if my_wl_list else "—"
-
-        col_w1, col_w2 = st.columns([3, 1])
-        with col_w1:
-            st.caption(f"Tickers suivis ({len(my_wl_list)}) : {my_wl_display}")
-        with col_w2:
-            hide_before_n_wl = st.selectbox(
-                "Masquer si earnings < N jours",
-                [0, 1, 2, 3, 5, 7, 14],
-                index=0,
-                key="watchlist_hide_earnings_days",
-                help="0 = ne rien masquer",
-            )
-
-        col_x, col_y = st.columns([1, 1])
-        with col_x:
-            st.download_button(
-                "⬇️ Exporter ma watchlist (CSV)",
-                data=pd.DataFrame({"ticker": my_wl_list}).to_csv(index=False).encode("utf-8"),
-                file_name="my_watchlist.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with col_y:
-            up = st.file_uploader(
-                "⬆️ Importer une watchlist (CSV)",
-                type=["csv"],
-                label_visibility="collapsed",
-            )
-            if up is not None:
-                try:
-                    df_up = pd.read_csv(up)
-                    col = df_up.columns[0] if len(df_up.columns) else None
-                    imported = (
-                        df_up[col]
-                        .astype(str)
-                        .str.upper()
-                        .str.strip()
-                        .tolist()
-                        if col
-                        else []
-                    )
-                    wl = sorted(
-                        set(st.session_state.get("my_watchlist", []) + imported)
-                    )
-                    st.session_state["my_watchlist"] = wl
-                    save_user_watchlist(wl)
-                    df_sync = normalize_cols(pd.DataFrame({"ticker": wl}))
-                    st.session_state[MY_WATCHLIST_KEY] = df_sync.copy()
-                    st.success(f"Watchlist importée ({len(imported)} entrées).")
-                    st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Import invalide: {e}")
-
-        wl_len = len(st.session_state.get("my_watchlist", []))
-        st.caption(
-            f"💾 Watchlist persistée dans `data/my_watchlist.csv` · {wl_len} tickers"
-        )
-
-        wl = [
-            str(t).upper().strip()
-            for t in st.session_state.get("my_watchlist", [])
-            if str(t).strip()
-        ]
-        if not wl:
-            st.info("Votre watchlist est vide.")
+            if add_clicked:
+                if choice_label and choice_label != "— Sélectionner —":
+                    tkr_to_add = values[choice_label]
+                    wl = st.session_state.get("my_watchlist", [])
+                    if tkr_to_add not in wl:
+                        wl.append(tkr_to_add)
+                        st.session_state["my_watchlist"] = sorted(set(wl))
+                        save_user_watchlist(st.session_state["my_watchlist"])
+                        st.success(f"{tkr_to_add} ajouté à la watchlist.")
+                        st.experimental_rerun()
+                    else:
+                        st.info(f"{tkr_to_add} est déjà dans la watchlist.")
         else:
-            if "Ticker" not in view_scan.columns:
-                df_wl = pd.DataFrame()
-            else:
-                df_wl = view_scan[view_scan["Ticker"].isin(wl)].copy()
+            st.info(
+                "Aucune donnée affichée : lance un scan ou ajuste les filtres de marché."
+            )
 
-            if df_wl.empty:
-                st.warning(
-                    "Aucun des tickers de la watchlist n’est présent dans les résultats du scan actuel (filtres/limite ?)."
-                )
-            else:
-                render_results_table(
-                    df=df_wl,
-                    profile=profile,
-                    title="📊 Watchlist (mêmes colonnes et style que le scan)",
-                    hide_before_n=hide_before_n_wl,
-                    allow_delete=True,
-                )
+        wl_list = st.session_state.get("my_watchlist", [])
+        if wl_list:
+            st.caption(f"💾 Watchlist persistée ({len(wl_list)} tickers)")
 
-                updated_wl_list = [
-                    str(t).upper().strip()
-                    for t in st.session_state.get("my_watchlist", [])
-                    if str(t).strip()
-                ]
-                if set(updated_wl_list) != set(my_wl_list):
-                    wl_df = load_my_watchlist()
-                    if not wl_df.empty and "ticker" in wl_df.columns:
-                        wl_df = wl_df[
-                            wl_df["ticker"].astype(str).str.upper().isin(updated_wl_list)
-                        ].copy()
-                        order = {t: i for i, t in enumerate(updated_wl_list)}
-                        wl_df["__ord__"] = (
-                            wl_df["ticker"].astype(str).str.upper().map(order)
+            def _chunk(seq, n):
+                for i in range(0, len(seq), n):
+                    yield seq[i : i + n]
+
+            for row in _chunk(wl_list, 6):
+                cols_row = st.columns(len(row))
+                for i, tkr in enumerate(row):
+                    with cols_row[i]:
+                        st.markdown(
+                            "<div style='padding:6px 8px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;'>"
+                            f"<b>{tkr}</b></div>",
+                            unsafe_allow_html=True,
                         )
-                        wl_df = wl_df.sort_values("__ord__").drop(columns="__ord__")
-                    else:
-                        wl_df = normalize_cols(
-                            pd.DataFrame(columns=["isin", "ticker", "name", "market"])
-                        )
-                    save_my_watchlist(wl_df)
-                    my_wl_df = wl_df
-                    my_wl_list = updated_wl_list
-
-        st.markdown("---")
-
-        with st.expander("📥 Ajouter depuis la base (nom / ISIN / ticker)", expanded=False):
-            base_universe = load_universe()
-            q = st.text_input("Rechercher dans la base", "")
-            results = search_universe(q, topk=50) if q.strip() else base_universe.head(0)
-            if not results.empty:
-                st.dataframe(
-                    results[["ticker", "name", "isin", "market"]],
-                    use_container_width=True,
-                    height=260,
-                )
-                options = (
-                    results.apply(
-                        lambda r: f"{r['ticker']} — {r['name']} ({r['isin']})",
-                        axis=1,
-                    ).tolist()
-                )
-                pick = st.multiselect("Sélectionne ce que tu veux ajouter", options)
-                if st.button("➕ Ajouter à ma watchlist"):
-                    to_add = []
-                    lookup = {
-                        (
-                            f"{r['ticker']} — {r['name']} ({r['isin']})"
-                        ): r
-                        for _, r in results.iterrows()
-                    }
-                    for p in pick:
-                        row = lookup.get(p)
-                        if row is not None:
-                            to_add.append(
-                                {
-                                    "isin": row.get("isin", ""),
-                                    "ticker": row.get("ticker", ""),
-                                    "name": row.get("name", ""),
-                                    "market": row.get("market", ""),
-                                }
-                            )
-                    if to_add:
-                        add_df = normalize_cols(pd.DataFrame(to_add))
-                        if "ticker" in add_df.columns:
-                            add_df["ticker"] = add_df["ticker"].map(_norm_ticker)
-                        my_wl_df = (
-                            pd.concat([my_wl_df, add_df], ignore_index=True)
-                            .drop_duplicates(subset=["isin", "ticker"])
-                        )
-                        save_my_watchlist(my_wl_df)
-                        st.session_state["my_watchlist"] = [
-                            str(t).upper().strip()
-                            for t in my_wl_df["ticker"].astype(str).tolist()
-                            if str(t).strip()
-                        ]
-                        st.success(f"{len(to_add)} valeur(s) ajoutée(s).")
-                        st.rerun()
-                    else:
-                        st.info("Sélection invalide : aucune valeur à ajouter.")
-            else:
-                st.info("Tape un nom, un ISIN ou un ticker pour rechercher dans la base.")
-
-        st.subheader("💾 Persistance GitHub — Ma watchlist")
-
-        col_git_a, col_git_b = st.columns(2)
-
-        with col_git_a:
-            if st.button("⬇️ Importer depuis GitHub (data/my_watchlist.csv)"):
-                gh_df = load_my_watchlist_from_github()
-                if gh_df is None or gh_df.empty:
-                    st.info("Aucun fichier trouvé ou CSV vide sur GitHub.")
-                else:
-                    save_my_watchlist(gh_df)
-                    st.success(
-                        f"Watchlist importée depuis GitHub ({len(gh_df)} lignes)."
-                    )
-                    st.rerun()
-
-        with col_git_b:
-            if st.button("⬆️ Sauvegarder sur GitHub (data/my_watchlist.csv)"):
-                ok = save_my_watchlist_to_github(load_my_watchlist())
-                if ok:
-                    st.success("Watchlist sauvegardée sur GitHub ✅")
-                else:
-                    st.error("Échec de la sauvegarde GitHub.")
+                        if st.button(
+                            "🗑️ Retirer",
+                            key=f"rmwl_{tkr}",
+                            use_container_width=True,
+                        ):
+                            new_wl = [x for x in wl_list if x != tkr]
+                            st.session_state["my_watchlist"] = new_wl
+                            save_user_watchlist(new_wl)
+                            st.experimental_rerun()
+        else:
+            st.caption("Watchlist vide.")
 
         with st.expander("🔎 Détails techniques (colonnes supplémentaires)"):
             extra_cols = ["MACD_hist", "VolZ20"]
