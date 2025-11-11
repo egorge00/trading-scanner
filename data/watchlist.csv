@@ -726,3 +726,7 @@ isin,ticker,name,market
 ,IMEU.L,iShares Core MSCI Europe UCITS (GBP),ETF
 ,EIMI.L,iShares Core MSCI EM IMI UCITS (GBP),ETF
 ,CW8.PA,Amundi MSCI World Swap UCITS (EUR),ETF
+,DEEZR.PA,Deezer (EUR),FR
+,UMG.AS,Universal Music Group (EUR),US
+,WMG,Warner Music Group Corp (USD),US
+,SPOT,Spotify (USD),US
