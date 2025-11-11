@@ -2,8 +2,7 @@ name: Daily Precompute Scans (Investor & Swing)
 
 on:
   schedule:
-    # toutes les 15 min; on gate sur Europe/Paris pour ne RUN qu'autour de 08:30 locales
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # gate 08:30 Paris dans le job
   workflow_dispatch: {}
 
 permissions:
@@ -25,20 +24,18 @@ jobs:
       - name: Time gate (Europe/Paris ~08:30)
         id: gate
         run: |
-          PARIS_TIME=$(TZ=Europe/Paris date +'%H:%M')
-          echo "Now in Paris: ${PARIS_TIME}"
-          # tolérance 15 minutes (08:30..08:44) pour absorber la latence cron
           H=$(TZ=Europe/Paris date +'%H')
           M=$(TZ=Europe/Paris date +'%M')
+          echo "Paris now: $(TZ=Europe/Paris date)"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual dispatch -> run_scan=true" >> $GITHUB_OUTPUT
+            echo "run_scan=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ "$H" = "08" ] && [ "$M" -ge 30 ] && [ "$M" -le 44 ]; then
             echo "run_scan=true" >> $GITHUB_OUTPUT
           else
             echo "run_scan=false" >> $GITHUB_OUTPUT
-            echo "Skip, not within 08:30..08:44 Paris."
+            echo "Skip (gate)."
           fi
 
       - name: Setup Python
@@ -60,15 +57,20 @@ jobs:
         run: |
           set -e
           python scripts/precompute_scan.py
-          echo "Listing data dir after build:"
+          echo "List data:"
           ls -lah data || true
 
-      - name: Commit artifacts
+      - name: Pull (avoid non-fast-forward)
         if: steps.gate.outputs.run_scan == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase || true
+
+      - name: Commit artifacts
+        if: steps.gate.outputs.run_scan == 'true'
+        run: |
           git add -A data/
           git status --porcelain
-          git commit -m "chore(data): precomputed scans ($(TZ=Europe/Paris date +'%Y-%m-%d %H:%M %Z'))" || echo "No changes to commit"
+          git commit -m "chore(data): precomputed ${{ matrix.profile }} ($(TZ=Europe/Paris date +'%Y-%m-%d %H:%M %Z'))" || echo "No changes"
           git push || true
