@@ -1,0 +1,21 @@
+{
+  "generated_at_utc": "2025-11-11 07:47:29 UTC",
+  "profile": "Investisseur",
+  "rows": 726,
+  "columns": [
+    "Ticker",
+    "Name",
+    "Market",
+    "Signal",
+    "ScoreFinal",
+    "ScoreTech",
+    "FscoreFund",
+    "RSI",
+    "%toHH52",
+    "Earnings",
+    "EarningsDate",
+    "EarningsD"
+  ],
+  "file": "data/daily_scan_investisseur.parquet",
+  "size_bytes": 35781
+}
