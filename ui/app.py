@@ -1740,25 +1740,14 @@ with tab_full:
     with card("🔧 Panneau de contrôle"):
         st.subheader("🌍 Marchés & Filtres")
 
-        col_markets, col_all, col_none = st.columns([2, 1, 1])
-        with col_markets:
-            st.multiselect(
-                "Marchés à inclure",
-                options=markets_all,
-                default=st.session_state["markets_selected"],
-                help="Sélectionne un ou plusieurs marchés à scanner.",
-                key="markets_selected",
-            )
-        with col_all:
-            if st.button("Tout sélectionner", use_container_width=True):
-                st.session_state["markets_selected"] = markets_all[:]
-        with col_none:
-            if st.button("Tout désélectionner", use_container_width=True):
-                st.session_state["markets_selected"] = []
-
-        selected_markets = [
-            str(x).upper() for x in st.session_state.get("markets_selected", [])
-        ]
+        selected_markets = st.multiselect(
+            "Marchés à inclure",
+            options=markets_all,
+            default=st.session_state["markets_selected"],
+            key="markets_selected",
+            help="Sélectionne un ou plusieurs marchés à inclure dans le scan.",
+        )
+        selected_markets = [str(x).upper() for x in selected_markets]
 
         col_limit, col_hide, col_refresh = st.columns([2, 1, 1])
         with col_limit:
@@ -1804,7 +1793,7 @@ with tab_full:
     if isinstance(df, pd.DataFrame) and not df.empty:
         view = df.copy()
         if selected_markets:
-            view = view[view["Market"].isin([m.upper() for m in selected_markets])]
+            view = view[view["Market"].isin(selected_markets)]
         else:
             view = view.iloc[0:0]
 
