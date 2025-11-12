@@ -1,0 +1,21 @@
+{
+  "generated_at_utc": "2025-11-12 07:47:48 UTC",
+  "profile": "Swing",
+  "rows": 769,
+  "columns": [
+    "Ticker",
+    "Name",
+    "Market",
+    "Signal",
+    "ScoreFinal",
+    "ScoreTech",
+    "FscoreFund",
+    "RSI",
+    "%toHH52",
+    "Earnings",
+    "EarningsDate",
+    "EarningsD"
+  ],
+  "file": "data/daily_scan_swing.parquet",
+  "size_bytes": 39744
+}
