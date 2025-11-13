@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2025-11-12 07:47:48 UTC",
+  "generated_at_utc": "2025-11-13 07:45:06 UTC",
   "profile": "Swing",
   "rows": 769,
   "columns": [
@@ -17,5 +17,5 @@
     "EarningsD"
   ],
   "file": "data/daily_scan_swing.parquet",
-  "size_bytes": 39744
+  "size_bytes": 39868
 }
