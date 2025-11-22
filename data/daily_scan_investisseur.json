@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2025-11-20 07:44:51 UTC",
+  "generated_at_utc": "2025-11-22 07:42:49 UTC",
   "profile": "Investisseur",
   "rows": 769,
   "columns": [
@@ -17,5 +17,5 @@
     "EarningsD"
   ],
   "file": "data/daily_scan_investisseur.parquet",
-  "size_bytes": 32158
+  "size_bytes": 31440
 }
