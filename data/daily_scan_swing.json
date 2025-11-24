@@ -1,7 +1,7 @@
 {
-  "generated_at_utc": "2025-11-23 07:42:28 UTC",
+  "generated_at_utc": "2025-11-24 07:46:13 UTC",
   "profile": "Swing",
-  "rows": 769,
+  "rows": 768,
   "columns": [
     "Ticker",
     "Name",
@@ -17,5 +17,5 @@
     "EarningsD"
   ],
   "file": "data/daily_scan_swing.parquet",
-  "size_bytes": 39574
+  "size_bytes": 39482
 }
