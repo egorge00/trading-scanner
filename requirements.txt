@@ -5,3 +5,4 @@ numpy>=1.26
 bcrypt
 requests
 pyarrow>=15
+fastapi>=0.110
