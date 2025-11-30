@@ -1422,8 +1422,9 @@ def _load_econ_news() -> tuple[list[NewsItem], str | None]:
         return get_news_items(), None
     except MissingApiKeyError:
         return [], "ALPHA_VANTAGE_API_KEY n'est pas configurée."
-    except NewsProviderError:
-        return [], "Impossible de charger les news (fournisseur)."
+    except NewsProviderError as exc:
+        msg = str(exc) or "Impossible de charger les news (fournisseur)."
+        return [], msg
 # ========= Onglets =========
 tab_full, tab_single, tab_pos, tab_news = st.tabs(
     ["🚀 Scanner complet", "📄 Fiche valeur", "💼 Positions", "📰 News & Macro"]
