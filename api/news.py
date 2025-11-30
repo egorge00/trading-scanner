@@ -143,24 +143,39 @@ def _fetch_provider_payload() -> dict:
     except Exception as exc:  # pragma: no cover - network layer
         raise NewsProviderError("News provider error") from exc
 
-    if resp.status_code != 200:
+    try:
+        data = resp.json()
+    except Exception as exc:  # pragma: no cover - invalid JSON
         try:
-            st.warning(f"Réponse brute Alpha Vantage: {resp.text[:500]}")
+            st.error("Impossible de charger les news (réponse illisible du fournisseur).")
+            st.code(resp.text[:500], language="json")
         except Exception:
             pass
-        raise NewsProviderError("News provider error")
-
-    try:
-        return resp.json()
-    except Exception as exc:  # pragma: no cover - invalid JSON
         raise NewsProviderError("News provider error") from exc
+
+    if resp.status_code != 200:
+        msg = data.get("Information") or data.get("Note") or f"HTTP {resp.status_code}"
+        try:
+            st.error(f"Impossible de charger les news (fournisseur): {msg}")
+            st.code(data, language="json")
+        except Exception:
+            pass
+        raise NewsProviderError(msg)
+
+    return data
 
 
 def _load_news_from_provider() -> list[NewsItem]:
     payload = _fetch_provider_payload()
     feed = payload.get("feed") if isinstance(payload, dict) else None
     if not isinstance(feed, list):
-        raise NewsProviderError("News provider error")
+        msg = payload.get("Information") or payload.get("Note") or "Réponse inattendue du fournisseur."
+        try:
+            st.error(f"Alpha Vantage: {msg}")
+            st.code(payload, language="json")
+        except Exception:
+            pass
+        raise NewsProviderError(msg)
 
     out: list[NewsItem] = []
     for item in feed:
