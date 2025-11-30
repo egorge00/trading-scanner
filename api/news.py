@@ -10,6 +10,7 @@ import time
 from typing import List, Literal, Optional
 
 import requests
+import streamlit as st
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, HttpUrl, ValidationError
 
@@ -42,6 +43,33 @@ router = APIRouter(prefix="/api/news", tags=["news"])
 
 _cache_data: list[NewsItem] | None = None
 _cache_timestamp: float | None = None
+
+
+def get_alpha_vantage_api_key() -> str:
+    """
+    Retourne la clé Alpha Vantage depuis st.secrets ou les variables d'environnement.
+    Lève une RuntimeError si la clé est absente.
+    """
+
+    key = None
+
+    # 1) Secrets Streamlit Cloud (recommandé)
+    try:
+        if hasattr(st, "secrets") and "ALPHA_VANTAGE_API_KEY" in st.secrets:
+            key = st.secrets["ALPHA_VANTAGE_API_KEY"]
+    except Exception:
+        # si st.secrets non dispo (ex: tests), on ignore
+        pass
+
+    # 2) Fallback variables d'environnement
+    if not key:
+        key = os.getenv("ALPHA_VANTAGE_API_KEY")
+
+    # 3) Erreur explicite si toujours rien
+    if not key:
+        raise RuntimeError("ALPHA_VANTAGE_API_KEY n'est pas configurée")
+
+    return key
 
 
 def _compute_sentiment_label(score: Optional[float]) -> Literal["bullish", "bearish", "neutral"]:
@@ -98,9 +126,10 @@ def _normalize_feed_item(item: dict) -> NewsItem | None:
 
 
 def _fetch_provider_payload() -> dict:
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-    if not api_key:
-        raise MissingApiKeyError("ALPHA_VANTAGE_API_KEY not set")
+    try:
+        api_key = get_alpha_vantage_api_key()
+    except RuntimeError as exc:
+        raise MissingApiKeyError(str(exc))
 
     params = {
         "function": "NEWS_SENTIMENT",
@@ -115,6 +144,10 @@ def _fetch_provider_payload() -> dict:
         raise NewsProviderError("News provider error") from exc
 
     if resp.status_code != 200:
+        try:
+            st.warning(f"Réponse brute Alpha Vantage: {resp.text[:500]}")
+        except Exception:
+            pass
         raise NewsProviderError("News provider error")
 
     try:
