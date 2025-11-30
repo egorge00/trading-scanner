@@ -770,3 +770,7 @@ isin,ticker,name,market
 ,6902.T,Denso Corp,JP
 ,8031.T,Mitsui & Co Ltd,JP
 ,6988.T,Nippon Sheet Glass Co Ltd,JP
+,AEEM.MI,AMUNDI MSCI EMERGING MARKETS,ETF
+,UST.PA,Lyxor Nasdaq-100 UCITS,ETF
+,PAASI.PA,Amundi MSCI Em Asia UCITS,ETF
+,SP5.PA,Lyxor S&P 500 UCITS ,ETF
