@@ -2094,6 +2094,225 @@ with tab_full:
         st.info(
             "Aucun cache disponible pour aujourd’hui. Clique sur **🚀 Lancer le scan** ou **🔄 Rafraîchir**."
         )
+
+    st.markdown("---")
+    st.subheader("🧪 Backtest")
+
+    AVAILABLE_MARKETS_BT = ["US", "FR", "UK", "DE", "JP", "ETF"]
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    with c1:
+        months_back = st.number_input(
+            "Mois en arrière (date de ref.)", min_value=3, max_value=36, value=12, step=1
+        )
+    with c2:
+        horizon_days = st.number_input(
+            "Horizon (jours ouvrés)", min_value=10, max_value=180, value=60, step=5
+        )
+    with c3:
+        markets = st.multiselect(
+            "Marchés", options=AVAILABLE_MARKETS_BT, default=["US", "FR"]
+        )
+    with c4:
+        limit = st.number_input(
+            "Limite tickers", min_value=10, max_value=1000, value=100, step=10
+        )
+
+    run_bt = st.button("🚀 Lancer le backtest", type="primary", use_container_width=True)
+
+    if run_bt:
+        try:
+            uni = _load_universe(markets=markets, limit=int(limit))
+            _check_universe(uni)
+            if uni.empty:
+                st.warning(
+                    "Univers vide selon ces filtres (markets/limit). Essaie d’augmenter 'Limite' ou d’inclure plus de marchés."
+                )
+            else:
+                df_bt, errors = _run_backtest(
+                    uni, int(months_back), int(horizon_days), max_workers=8
+                )
+
+                for col, default in [
+                    ("Perf_%", np.nan),
+                    ("ScoreRef", np.nan),
+                    ("SignalRef", "NA"),
+                    ("error", None),
+                    ("DateRef", None),
+                    ("DateH", None),
+                    ("CloseRef", np.nan),
+                    ("CloseH", np.nan),
+                ]:
+                    if col not in df_bt.columns:
+                        df_bt[col] = default
+
+                st.session_state["backtest_df"] = df_bt.copy()
+                st.session_state["backtest_errors"] = errors
+        except Exception as e:
+            st.error(f"Backtest impossible : {e}")
+
+    if "backtest_df" in st.session_state:
+        df_bt = st.session_state["backtest_df"].copy()
+        errors = st.session_state.get("backtest_errors", [])
+
+        for col, default in [
+            ("Perf_%", np.nan),
+            ("ScoreRef", np.nan),
+            ("SignalRef", "NA"),
+            ("error", None),
+            ("DateRef", None),
+            ("DateH", None),
+            ("CloseRef", np.nan),
+            ("CloseH", np.nan),
+        ]:
+            if col not in df_bt.columns:
+                df_bt[col] = default
+
+        df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
+        df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
+        df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
+
+        def _calibrate_thresholds_from_df(df, buy_q=70, sell_q=30):
+            x = pd.to_numeric(df["ScoreRef"], errors="coerce").dropna()
+            if len(x) < 10:
+                return 1.0, -1.0
+            return float(np.nanpercentile(x, buy_q)), float(np.nanpercentile(x, sell_q))
+
+        def _signal_calibrated(score, th_buy, th_sell):
+            if pd.isna(score):
+                return "NA"
+            s = float(score)
+            if s >= th_buy:
+                return "BUY"
+            if s <= th_sell:
+                return "SELL"
+            return "HOLD"
+
+        HOLD_BAND = 2.0
+
+        def _is_good(signal, perf):
+            if pd.isna(perf):
+                return None
+            s = str(signal).upper()
+            if s == "BUY":
+                return perf > 0
+            if s in ("SELL", "REDUCE"):
+                return perf < 0
+            if s in ("HOLD", "WATCH"):
+                return abs(perf) <= HOLD_BAND
+            return None
+
+        def _label_quality(good):
+            if good is True:
+                return "✅ Bon"
+            if good is False:
+                return "❌ Mauvais"
+            return "—"
+
+        th_buy, th_sell = _calibrate_thresholds_from_df(df_bt, buy_q=70, sell_q=30)
+        df_bt["Signal_original"] = df_bt["SignalRef"]
+        df_bt["Signal_calibre"] = df_bt["ScoreRef"].apply(
+            lambda s: _signal_calibrated(s, th_buy, th_sell)
+        )
+
+        cv1, cv2 = st.columns([1, 3])
+        with cv1:
+            view_mode = st.radio(
+                "Vue",
+                ["Originale", "Calibrée (Q70/Q30)"],
+                index=0,
+                help="Originale = signal venant de compute_score_investor ; Calibrée = signal reconstruit par quantiles sur ScoreRef.",
+            )
+        with cv2:
+            sort_by = st.selectbox("Trier par", ["ScoreRef", "Perf_%", "Ticker"], index=0)
+            sort_desc = st.checkbox("Tri décroissant", value=True)
+
+        signal_col = "Signal_original" if view_mode.startswith("Originale") else "Signal_calibre"
+
+        df_view = df_bt.copy()
+        df_view["SignalUse"] = df_view[signal_col].astype(str).str.upper().fillna("NA")
+        df_view["GoodAdvice"] = df_view.apply(
+            lambda r: _is_good(r["SignalUse"], r["Perf_%"]), axis=1
+        )
+        df_view["Quality"] = df_view["GoodAdvice"].apply(_label_quality)
+
+        if df_view["GoodAdvice"].notna().any():
+            total = int(df_view["GoodAdvice"].notna().sum())
+            bons = int((df_view["GoodAdvice"] == True).sum())
+            pct_bon = round(bons / total * 100.0, 1) if total > 0 else 0.0
+            st.markdown(
+                f"### ✅ {pct_bon}% de bons conseils ({bons}/{total}) – Vue : {view_mode}"
+            )
+
+        copt1, copt2, _ = st.columns([1, 1, 2])
+        with copt1:
+            only_with_perf = st.checkbox(
+                "Uniquement lignes avec performance",
+                value=True,
+                key=f"bt_onlyperf_{view_mode}",
+            )
+        with copt2:
+            show_errors = st.checkbox(
+                "Afficher lignes en erreur",
+                value=False,
+                key=f"bt_err_{view_mode}",
+            )
+
+        df_show = df_view.copy()
+        if only_with_perf:
+            df_show = df_show[df_show["Perf_%"].notna()].copy()
+        if not show_errors and "error" in df_show.columns:
+            df_show = df_show[df_show["error"].isna()].copy()
+
+        cols_order = [
+            c
+            for c in [
+                "Ticker",
+                "Name",
+                "Market",
+                "DateRef",
+                "DateH",
+                "CloseRef",
+                "CloseH",
+                "Perf_%",
+                "ScoreRef",
+                "SignalUse",
+                "Quality",
+                "error",
+            ]
+            if c in df_show.columns
+        ]
+
+        if sort_by in df_show.columns:
+            df_show = df_show.sort_values(
+                sort_by, ascending=not sort_desc, na_position="last"
+            )
+
+        st.dataframe(df_show[cols_order], use_container_width=True, hide_index=True)
+
+        csv_buf = io.StringIO()
+        df_show[cols_order].to_csv(csv_buf, index=False)
+        st.download_button(
+            f"⬇️ Exporter la liste ({view_mode})",
+            data=csv_buf.getvalue().encode("utf-8"),
+            file_name=f"backtest_{'cal' if view_mode.startswith('Calibrée') else 'orig'}_m{months_back}_h{horizon_days}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        if errors or ("error" in df_bt.columns and df_bt["error"].notna().any()):
+            with st.expander("⚠️ Logs / Lignes en erreur", expanded=False):
+                if errors:
+                    st.write(errors[:50])
+                if "error" in df_bt.columns:
+                    cols_order_err = [c for c in cols_order if c in df_bt.columns]
+                    st.dataframe(
+                        df_bt[df_bt["error"].notna()][cols_order_err],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+    else:
+        st.info("Lance d’abord un backtest pour voir les résultats.")
+
 # --------- Onglet 💼 POSITIONS ---------
 with tab_pos:
     st.title("💼 Positions en cours")
@@ -2485,239 +2704,3 @@ def _run_backtest(
     return df_res, errs
 
 
-# ============ UI Backtest ============
-st.markdown("---")
-st.header("📈 Backtest (basique)")
-
-# Choix simples
-AVAILABLE_MARKETS_BT = ["US", "FR", "UK", "DE", "JP", "ETF"]
-c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-with c1:
-    months_back = st.number_input(
-        "Mois en arrière (date de ref.)", min_value=3, max_value=36, value=12, step=1
-    )
-with c2:
-    horizon_days = st.number_input(
-        "Horizon (jours ouvrés)", min_value=10, max_value=180, value=60, step=5
-    )
-with c3:
-    markets = st.multiselect(
-        "Marchés", options=AVAILABLE_MARKETS_BT, default=["US", "FR"]
-    )
-with c4:
-    limit = st.number_input(
-        "Limite tickers", min_value=10, max_value=1000, value=100, step=10
-    )
-
-run_bt = st.button("🚀 Lancer le backtest", type="primary", use_container_width=True)
-
-if run_bt:
-    try:
-        uni = _load_universe(markets=markets, limit=int(limit))
-        _check_universe(uni)
-        if uni.empty:
-            st.warning(
-                "Univers vide selon ces filtres (markets/limit). Essaie d’augmenter 'Limite' ou d’inclure plus de marchés."
-            )
-        else:
-            df_bt, errors = _run_backtest(
-                uni, int(months_back), int(horizon_days), max_workers=8
-            )
-
-            # ---------- Garanties de schéma (évite les KeyError) ----------
-            for col, default in [
-                ("Perf_%", np.nan),
-                ("ScoreRef", np.nan),
-                ("SignalRef", "NA"),
-                ("error", None),
-                ("DateRef", None),
-                ("DateH", None),
-                ("CloseRef", np.nan),
-                ("CloseH", np.nan),
-            ]:
-                if col not in df_bt.columns:
-                    df_bt[col] = default
-
-            st.session_state["backtest_df"] = df_bt.copy()
-            st.session_state["backtest_errors"] = errors
-    except Exception as e:
-        st.error(f"Backtest impossible : {e}")
-
-
-# =============================
-# Affichage Backtest si résultat en mémoire
-# =============================
-if "backtest_df" in st.session_state:
-    df_bt = st.session_state["backtest_df"].copy()
-    errors = st.session_state.get("backtest_errors", [])
-
-    # Garanties de schéma
-    import numpy as np
-
-    for col, default in [
-        ("Perf_%", np.nan),
-        ("ScoreRef", np.nan),
-        ("SignalRef", "NA"),
-        ("error", None),
-        ("DateRef", None),
-        ("DateH", None),
-        ("CloseRef", np.nan),
-        ("CloseH", np.nan),
-    ]:
-        if col not in df_bt.columns:
-            df_bt[col] = default
-
-    df_bt["Perf_%"] = pd.to_numeric(df_bt["Perf_%"], errors="coerce")
-    df_bt["ScoreRef"] = pd.to_numeric(df_bt["ScoreRef"], errors="coerce")
-    df_bt["SignalRef"] = df_bt["SignalRef"].astype(str).str.upper().fillna("NA")
-
-    # Helpers calibration
-    def _calibrate_thresholds_from_df(df, buy_q=70, sell_q=30):
-        x = pd.to_numeric(df["ScoreRef"], errors="coerce").dropna()
-        if len(x) < 10:
-            return 1.0, -1.0
-        return float(np.nanpercentile(x, buy_q)), float(np.nanpercentile(x, sell_q))
-
-    def _signal_calibrated(score, th_buy, th_sell):
-        if pd.isna(score):
-            return "NA"
-        s = float(score)
-        if s >= th_buy:
-            return "BUY"
-        if s <= th_sell:
-            return "SELL"
-        return "HOLD"
-
-    HOLD_BAND = 2.0  # % neutre pour HOLD/WATCH
-
-    def _is_good(signal, perf):
-        if pd.isna(perf):
-            return None
-        s = str(signal).upper()
-        if s == "BUY":
-            return perf > 0
-        if s in ("SELL", "REDUCE"):
-            return perf < 0
-        if s in ("HOLD", "WATCH"):
-            return abs(perf) <= HOLD_BAND
-        return None
-
-    def _label_quality(good):
-        if good is True:
-            return "✅ Bon"
-        if good is False:
-            return "❌ Mauvais"
-        return "—"
-
-    # Prépare la vue calibrée
-    th_buy, th_sell = _calibrate_thresholds_from_df(df_bt, buy_q=70, sell_q=30)
-    df_bt["Signal_original"] = df_bt["SignalRef"]
-    df_bt["Signal_calibre"] = df_bt["ScoreRef"].apply(
-        lambda s: _signal_calibrated(s, th_buy, th_sell)
-    )
-
-    st.markdown("---")
-    cv1, cv2 = st.columns([1, 3])
-    with cv1:
-        view_mode = st.radio(
-            "Vue",
-            ["Originale", "Calibrée (Q70/Q30)"],
-            index=0,
-            help="Originale = signal venant de compute_score_investor ; Calibrée = signal reconstruit par quantiles sur ScoreRef.",
-        )
-    with cv2:
-        sort_by = st.selectbox("Trier par", ["ScoreRef", "Perf_%", "Ticker"], index=0)
-        sort_desc = st.checkbox("Tri décroissant", value=True)
-
-    # Choix de la colonne de signal selon la vue
-    signal_col = "Signal_original" if view_mode.startswith("Originale") else "Signal_calibre"
-
-    df_view = df_bt.copy()
-    df_view["SignalUse"] = df_view[signal_col].astype(str).str.upper().fillna("NA")
-    df_view["GoodAdvice"] = df_view.apply(
-        lambda r: _is_good(r["SignalUse"], r["Perf_%"]), axis=1
-    )
-    df_view["Quality"] = df_view["GoodAdvice"].apply(_label_quality)
-
-    # Indicateur global
-    if df_view["GoodAdvice"].notna().any():
-        total = int(df_view["GoodAdvice"].notna().sum())
-        bons = int((df_view["GoodAdvice"] == True).sum())
-        pct_bon = round(bons / total * 100.0, 1) if total > 0 else 0.0
-        st.markdown(
-            f"### ✅ {pct_bon}% de bons conseils ({bons}/{total}) – Vue : {view_mode}"
-        )
-
-    # Filtrage options
-    copt1, copt2, _ = st.columns([1, 1, 2])
-    with copt1:
-        only_with_perf = st.checkbox(
-            "Uniquement lignes avec performance",
-            value=True,
-            key=f"bt_onlyperf_{view_mode}",
-        )
-    with copt2:
-        show_errors = st.checkbox(
-            "Afficher lignes en erreur",
-            value=False,
-            key=f"bt_err_{view_mode}",
-        )
-
-    df_show = df_view.copy()
-    if only_with_perf:
-        df_show = df_show[df_show["Perf_%"].notna()].copy()
-    if not show_errors and "error" in df_show.columns:
-        df_show = df_show[df_show["error"].isna()].copy()
-
-    cols_order = [
-        c
-        for c in [
-            "Ticker",
-            "Name",
-            "Market",
-            "DateRef",
-            "DateH",
-            "CloseRef",
-            "CloseH",
-            "Perf_%",
-            "ScoreRef",
-            "SignalUse",
-            "Quality",
-            "error",
-        ]
-        if c in df_show.columns
-    ]
-
-    if sort_by in df_show.columns:
-        df_show = df_show.sort_values(
-            sort_by, ascending=not sort_desc, na_position="last"
-        )
-
-    st.dataframe(df_show[cols_order], use_container_width=True, hide_index=True)
-
-    import io
-
-    csv_buf = io.StringIO()
-    df_show[cols_order].to_csv(csv_buf, index=False)
-    st.download_button(
-        f"⬇️ Exporter la liste ({view_mode})",
-        data=csv_buf.getvalue().encode("utf-8"),
-        file_name=f"backtest_{'cal' if view_mode.startswith('Calibrée') else 'orig'}_m{months_back}_h{horizon_days}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    # ---------- Logs d’erreur (facultatif, sous expander) ----------
-    if errors or ("error" in df_bt.columns and df_bt["error"].notna().any()):
-        with st.expander("⚠️ Logs / Lignes en erreur", expanded=False):
-            if errors:
-                st.write(errors[:50])
-            if "error" in df_bt.columns:
-                cols_order_err = [c for c in cols_order if c in df_bt.columns]
-                st.dataframe(
-                    df_bt[df_bt["error"].notna()][cols_order_err],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-else:
-    st.info("Lance d’abord un backtest pour voir les résultats.")
