@@ -8,6 +8,7 @@ import base64
 import contextlib
 import hashlib
 import math
+import html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -612,6 +613,12 @@ from api.core.scoring import (  # noqa: E402
     compute_kpis_investor,
     compute_score,
     compute_score_investor,
+)
+from api.news import (  # noqa: E402
+    MissingApiKeyError,
+    NewsItem,
+    NewsProviderError,
+    get_news_items,
 )
 # --- fondamentaux (safe) ---
 try:  # noqa: E402
@@ -1341,9 +1348,85 @@ def validate_ticker(tkr: str) -> tuple[bool, str]:
     if not re.match(r"^[A-Z0-9\.-]{1,12}$", t):
         return False, "format_ticker_invalide"
     return False, "ticker_hors_univers"
+
+
+def _sentiment_label(label: str) -> str:
+    mapping = {
+        "all": "Tous",
+        "bullish": "Bullish",
+        "bearish": "Bearish",
+        "neutral": "Neutre",
+    }
+    return mapping.get(label, label)
+
+
+def _sentiment_badge(label: str) -> str:
+    colors = {
+        "bullish": "#16a34a",  # green-600
+        "bearish": "#dc2626",  # red-600
+        "neutral": "#6b7280",  # gray-500
+    }
+    bg = colors.get(label, "#6b7280")
+    label_text = html.escape(_sentiment_label(label))
+    return (
+        f"<span style=\"background:{bg}15;color:{bg};padding:4px 8px;"
+        f"border-radius:999px;font-size:12px;font-weight:600;\">{label_text}</span>"
+    )
+
+
+def _ticker_badge(ticker: str) -> str:
+    return (
+        "<span style='background:#e5e7eb;color:#111827;padding:4px 8px;"
+        "border-radius:8px;font-size:12px;font-weight:600;display:inline-block;"
+        "margin-right:6px;margin-bottom:4px;'>"
+        f"{html.escape(ticker)}</span>"
+    )
+
+
+def _render_news_card(item: NewsItem):
+    title = html.escape(item.headline)
+    summary = html.escape(item.summary) if item.summary else ""
+    meta_parts = []
+    if item.source:
+        meta_parts.append(html.escape(item.source))
+    if item.published_at:
+        meta_parts.append(html.escape(item.published_at))
+
+    tickers_badges = ""
+    visible_tickers = item.tickers[:4]
+    if visible_tickers:
+        tickers_badges = "".join([_ticker_badge(t) for t in visible_tickers])
+        extra = len(item.tickers) - len(visible_tickers)
+        if extra > 0:
+            tickers_badges += _ticker_badge(f"+{extra}")
+
+    st.markdown(
+        "<div style='border:1px solid #e5e7eb;border-radius:16px;padding:14px;"
+        "background-color:rgba(249,250,251,0.6);margin-bottom:12px;'>"
+        "<div style='display:flex;align-items:flex-start;justify-content:space-between;gap:12px;'>"
+        f"<div style='flex:1 1 auto;'><div style='font-size:1.05rem;font-weight:700;margin-bottom:4px;'>{title}</div>"
+        f"<div style='color:#4b5563;font-size:0.95rem;line-height:1.5;'>{summary or '—'}</div>"
+        "</div>"
+        f"<div style='flex:0 0 auto;'>{_sentiment_badge(item.sentiment_label)}</div>"
+        "</div>"
+        f"<div style='color:#6b7280;font-size:12px;margin-top:6px;'>{' · '.join(meta_parts)}</div>"
+        f"<div style='margin-top:8px;'>{tickers_badges}</div>"
+        f"<div style='margin-top:10px;'><a href='{html.escape(item.url)}' target='_blank' rel='noreferrer' style='color:#2563eb;font-weight:600;text-decoration:none;'>Voir l’article ↗</a></div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _load_econ_news() -> tuple[list[NewsItem], str | None]:
+    try:
+        return get_news_items(), None
+    except MissingApiKeyError:
+        return [], "ALPHA_VANTAGE_API_KEY n'est pas configurée."
+    except NewsProviderError:
+        return [], "Impossible de charger les news (fournisseur)."
 # ========= Onglets =========
-tab_full, tab_single, tab_pos = st.tabs(
-    ["🚀 Scanner complet", "📄 Fiche valeur", "💼 Positions"]
+tab_full, tab_single, tab_pos, tab_news = st.tabs(
+    ["🚀 Scanner complet", "📄 Fiche valeur", "💼 Positions", "📰 News & Macro"]
 )
 
 # --------- Onglet FICHE ---------
@@ -2141,6 +2224,39 @@ with tab_pos:
                     file_name="positions.csv",
                     mime="text/csv"
                 )
+
+
+# --------- Onglet 📰 NEWS & MACRO ---------
+with tab_news:
+    st.title("📰 News & Macro")
+    st.caption(
+        "Flux de news économiques et de marché pour contextualiser les signaux."
+    )
+
+    sentiment_filter = st.radio(
+        "Filtrer par sentiment",
+        ["all", "bullish", "bearish", "neutral"],
+        format_func=_sentiment_label,
+        horizontal=True,
+    )
+
+    with st.spinner("Chargement des news…"):
+        news_items, news_error = _load_econ_news()
+
+    if news_error:
+        st.error(news_error)
+    else:
+        filtered_news = (
+            news_items
+            if sentiment_filter == "all"
+            else [n for n in news_items if n.sentiment_label == sentiment_filter]
+        )
+
+        if not filtered_news:
+            st.info("Aucune news disponible pour le moment.")
+        else:
+            for item in filtered_news:
+                _render_news_card(item)
 
 
 # ===========================
